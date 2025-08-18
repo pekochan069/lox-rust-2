@@ -3,4 +3,14 @@ name = "lox-rust-2"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+proc-macro = true
+
 [dependencies]
+clap = { version = "4.5.45", features = ["derive"] }
+log = { version = "0.4.27", features = ["std"] }
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+
+[features]
+trace_execution = []

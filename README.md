@@ -29,3 +29,9 @@ cd lox-rust-2
 ```bash
 cargo build
 ```
+
+To enable debug disassembly, use `disassemble` feature
+
+```bash
+cargo build --features disassemble
+```
