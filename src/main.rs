@@ -1,18 +1,26 @@
+#![feature(gen_blocks)]
 mod args;
+mod compile;
 mod debug;
+mod error;
+mod lexer;
 mod logger;
+mod parser;
+mod token;
 mod value;
 mod vm;
 
-use std::{fs, io, process};
+use std::{
+    fs,
+    io::{self, Write},
+    process,
+};
 
 use clap::Parser;
 
 use args::Args;
 use logger::init_logger;
-use vm::VM;
-
-use crate::vm::InterpretResult;
+use vm::{InterpretResult, VM};
 
 fn main() {
     let args = args::Args::parse();
@@ -28,12 +36,21 @@ fn main() {
     }
 }
 fn run_file(args: &Args, path: &str) {
-    let mut vm = VM::new(&args);
-
     let Ok(source) = fs::read_to_string(&path) else {
         log::error!("Cannot read file from {path}");
         process::exit(74);
     };
+
+    // let mut lexer = Lexer::new(source.as_str());
+
+    // for maybe_token in lexer.iter() {
+    //     match maybe_token {
+    //         Ok(token) => println!("{:?}", token),
+    //         Err(e) => e.report(),
+    //     }
+    // }
+
+    let mut vm = VM::new(args);
 
     let result = vm.interpret(source);
 
@@ -49,6 +66,8 @@ fn run_file(args: &Args, path: &str) {
 fn repl(args: &Args) {
     let mut vm = VM::new(&args);
     loop {
+        print!("> ");
+        io::stdout().flush().unwrap();
         let mut input_string = String::new();
         io::stdin()
             .read_line(&mut input_string)
