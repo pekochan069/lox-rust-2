@@ -1,11 +1,11 @@
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 #[derive(Debug, Clone)]
 pub enum Value {
     Bool { value: bool },
     Number { value: f64 },
     Nil,
-    String { value: String },
+    String { value: Rc<String> },
 }
 
 impl Value {

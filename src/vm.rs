@@ -1,5 +1,6 @@
 use log::trace;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use lox_rust_2::{binary_bool_op, binary_number_op};
 
@@ -125,12 +126,21 @@ pub enum InterpretResult {
     RuntimeError,
 }
 
+#[derive(Debug)]
+struct Local {
+    variables: HashMap<Rc<String>, Value>,
+}
+
+impl Local {}
+
 pub struct VM {
     pub chunk: Chunk,
     cursor: usize,
     stack: Vec<Value>,
     source: String,
-    globals: HashMap<String, Value>,
+    globals: HashMap<Rc<String>, Value>,
+    locals: Vec<Local>,
+    scope_depth: usize,
 }
 
 impl VM {
@@ -142,6 +152,8 @@ impl VM {
             stack: vec![],
             source: String::new(),
             globals: HashMap::new(),
+            locals: vec![],
+            scope_depth: 0,
         }
     }
 
@@ -336,10 +348,12 @@ impl VM {
                 let a = self.pop_value().unwrap();
 
                 match (a, b) {
-                    (Value::String { value: a_value }, Value::String { value: b_value }) => self
-                        .push_value(Value::String {
-                            value: a_value + &b_value,
-                        }),
+                    (Value::String { value: a_value }, Value::String { value: b_value }) => {
+                        let concatenated = format!("{}{}", a_value, b_value);
+                        self.push_value(Value::String {
+                            value: Rc::new(concatenated),
+                        });
+                    }
                     _ => {}
                 }
             }

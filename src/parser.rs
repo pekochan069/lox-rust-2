@@ -1,4 +1,4 @@
-use std::iter::Peekable;
+use std::{iter::Peekable, rc::Rc};
 
 use log::trace;
 
@@ -448,7 +448,7 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::string()");
         let lexeme = self.previous.lexeme.clone().unwrap();
         self.emit_constant(Value::String {
-            value: String::from(&self.source[lexeme.start..lexeme.end]),
+            value: Rc::new(String::from(&self.source[lexeme.start..lexeme.end])),
         });
     }
 
@@ -478,7 +478,7 @@ impl<'a> Parser<'a> {
     fn identifier_constant(&mut self, name: Span) -> usize {
         trace!("parser::Parser::identifier_constant(name: {:?})", name);
         self.chunk.add_constant(Value::String {
-            value: String::from(&self.source[name.start..name.end]),
+            value: Rc::new(String::from(&self.source[name.start..name.end])),
         })
     }
 
