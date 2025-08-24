@@ -207,6 +207,7 @@ pub struct Parser<'a> {
     had_error: bool,
     panic: bool,
     chunk: &'a mut Chunk,
+    scope_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -215,11 +216,12 @@ impl<'a> Parser<'a> {
         Self {
             source,
             tokens,
-            previous: Token::new(TokenType::Error, 0, 0, Span::new(0, 0), None),
-            current: Token::new(TokenType::Error, 0, 0, Span::new(0, 0), None),
+            previous: Token::new(TokenType::Error, 0, 0, Span::new(0, 0)),
+            current: Token::new(TokenType::Error, 0, 0, Span::new(0, 0)),
             had_error: false,
             panic: false,
             chunk,
+            scope_depth: 0,
         }
     }
 
@@ -387,7 +389,7 @@ impl<'a> Parser<'a> {
 
     fn number(&mut self) {
         trace!("parser::Parser::number()");
-        let num_str = self.span_to_str(self.previous.lexeme.clone().unwrap());
+        let num_str = self.span_to_str(self.previous.literal.clone());
         let value = num_str.parse::<f64>().unwrap();
         self.emit_constant(Value::Number { value });
     }
@@ -446,9 +448,11 @@ impl<'a> Parser<'a> {
 
     fn string(&mut self) {
         trace!("parser::Parser::string()");
-        let lexeme = self.previous.lexeme.clone().unwrap();
+        let literal = self.previous.literal.clone();
         self.emit_constant(Value::String {
-            value: Rc::new(String::from(&self.source[lexeme.start..lexeme.end])),
+            value: Rc::new(String::from(
+                &self.source[literal.start + 1..literal.end - 1],
+            )),
         });
     }
 
@@ -472,8 +476,16 @@ impl<'a> Parser<'a> {
     fn parse_variable(&mut self, error_message: &str) -> usize {
         trace!("parser::Parser::parse_variable()");
         self.consume(TokenType::Identifier, error_message);
+
+        self.declare_variable();
+        if self.scope_depth > 0 {
+            return 0;
+        }
+
         self.identifier_constant(self.previous.literal.clone())
     }
+
+    fn declare_variable(&mut self) {}
 
     fn identifier_constant(&mut self, name: Span) -> usize {
         trace!("parser::Parser::identifier_constant(name: {:?})", name);
@@ -484,6 +496,10 @@ impl<'a> Parser<'a> {
 
     fn define_variable(&mut self, global: usize) {
         trace!("parser::Parser::define_variable(global: {global})");
+        if self.scope_depth > 0 {
+            return;
+        }
+
         self.emit_op(OpCode::DefineGlobal);
         self.emit_op_usize(global);
     }
@@ -521,6 +537,11 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::statement()");
         match self.current.token_type {
             TokenType::Print => self.print_statement(),
+            TokenType::LeftBrace => {
+                self.begin_scope();
+                self.block();
+                self.end_scope();
+            }
             _ => self.expression_statement(),
         }
     }
@@ -533,11 +554,28 @@ impl<'a> Parser<'a> {
         self.emit_op(OpCode::Print);
     }
 
+    fn block(&mut self) {
+        trace!("parser::Parser::block()");
+
+        while !self.check_type(TokenType::RightBrace) && !self.check_type(TokenType::Eof) {
+            self.declaration();
+        }
+
+        self.consume(TokenType::RightBrace, "Expected '}' after block.");
+    }
+
     fn expression_statement(&mut self) {
         trace!("parser::Parser::expression_statement()");
         self.expression();
         self.consume(TokenType::Semi, "Expected ';' after expression.");
         self.emit_op(OpCode::Pop);
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
     }
 }
 
@@ -545,13 +583,12 @@ impl<'a> Parser<'a> {
     fn emit_op(&mut self, op: OpCode) {
         trace!("parser::Parser::emit_op(op: {:?})", op);
         self.chunk
-            .write(op as usize, Loc::new(self.previous.line, self.previous.col));
+            .write(op as usize, self.previous.line, self.previous.col);
     }
 
     fn emit_op_usize(&mut self, op: usize) {
         trace!("parser::Parser::emit_op(op: {op})");
-        self.chunk
-            .write(op, Loc::new(self.previous.line, self.previous.col));
+        self.chunk.write(op, self.previous.line, self.previous.col);
     }
 
     fn emit_ops(&mut self, op1: OpCode, op2: OpCode) {

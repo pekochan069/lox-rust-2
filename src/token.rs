@@ -68,27 +68,19 @@ pub struct Token {
     pub line: usize,
     pub col: usize,
     pub literal: Span,
-    pub lexeme: Option<Span>,
 }
 
 impl Token {
-    pub fn new(
-        token_type: TokenType,
-        line: usize,
-        col: usize,
-        literal: Span,
-        lexeme: Option<Span>,
-    ) -> Self {
+    pub fn new(token_type: TokenType, line: usize, col: usize, literal: Span) -> Self {
         trace!(
-            "token::Token::new(token_type: {:?}, line: {line}, col: {col}, literal: {:?}, lexeme: {:?})",
-            token_type, literal, lexeme
+            "token::Token::new(token_type: {:?}, line: {line}, col: {col}, literal: {:?})",
+            token_type, literal
         );
         Self {
             token_type,
             line,
             col,
             literal,
-            lexeme,
         }
     }
 

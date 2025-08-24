@@ -68,46 +68,46 @@ impl<'a> Lexer<'a> {
         self.start = self.current;
 
         let Some(c) = self.advance() else {
-            return Ok(self.create_token(TokenType::Eof, None));
+            return Ok(self.create_token(TokenType::Eof));
         };
 
         match c {
-            '(' => Ok(self.create_token(TokenType::LeftParen, None)),
-            ')' => Ok(self.create_token(TokenType::RightParen, None)),
-            '{' => Ok(self.create_token(TokenType::LeftBrace, None)),
-            '}' => Ok(self.create_token(TokenType::RightBrace, None)),
-            ';' => Ok(self.create_token(TokenType::Semi, None)),
-            ',' => Ok(self.create_token(TokenType::Comma, None)),
-            '.' => Ok(self.create_token(TokenType::Dot, None)),
-            '+' => Ok(self.create_token(TokenType::Plus, None)),
-            '-' => Ok(self.create_token(TokenType::Minus, None)),
-            '*' => Ok(self.create_token(TokenType::Star, None)),
+            '(' => Ok(self.create_token(TokenType::LeftParen)),
+            ')' => Ok(self.create_token(TokenType::RightParen)),
+            '{' => Ok(self.create_token(TokenType::LeftBrace)),
+            '}' => Ok(self.create_token(TokenType::RightBrace)),
+            ';' => Ok(self.create_token(TokenType::Semi)),
+            ',' => Ok(self.create_token(TokenType::Comma)),
+            '.' => Ok(self.create_token(TokenType::Dot)),
+            '+' => Ok(self.create_token(TokenType::Plus)),
+            '-' => Ok(self.create_token(TokenType::Minus)),
+            '*' => Ok(self.create_token(TokenType::Star)),
             '=' => {
                 if self.match_char('=') {
-                    Ok(self.create_token(TokenType::EqualEqual, None))
+                    Ok(self.create_token(TokenType::EqualEqual))
                 } else {
-                    Ok(self.create_token(TokenType::Equal, None))
+                    Ok(self.create_token(TokenType::Equal))
                 }
             }
             '!' => {
                 if self.match_char('=') {
-                    Ok(self.create_token(TokenType::BangEqual, None))
+                    Ok(self.create_token(TokenType::BangEqual))
                 } else {
-                    Ok(self.create_token(TokenType::Bang, None))
+                    Ok(self.create_token(TokenType::Bang))
                 }
             }
             '>' => {
                 if self.match_char('=') {
-                    Ok(self.create_token(TokenType::GreaterEqual, None))
+                    Ok(self.create_token(TokenType::GreaterEqual))
                 } else {
-                    Ok(self.create_token(TokenType::Greater, None))
+                    Ok(self.create_token(TokenType::Greater))
                 }
             }
             '<' => {
                 if self.match_char('=') {
-                    Ok(self.create_token(TokenType::LessEqual, None))
+                    Ok(self.create_token(TokenType::LessEqual))
                 } else {
-                    Ok(self.create_token(TokenType::Less, None))
+                    Ok(self.create_token(TokenType::Less))
                 }
             }
             '/' => {
@@ -116,7 +116,7 @@ impl<'a> Lexer<'a> {
                 } else if self.match_char('*') {
                     self.multi_line_comment()
                 } else {
-                    Ok(self.create_token(TokenType::Slash, None))
+                    Ok(self.create_token(TokenType::Slash))
                 }
             }
             '"' | '\'' => self.string(c),
@@ -131,14 +131,13 @@ impl<'a> Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn create_token(&self, token_type: TokenType, lexeme: Option<Span>) -> Token {
+    fn create_token(&self, token_type: TokenType) -> Token {
         trace!("lexer::Lexer::create_token");
         Token::new(
             token_type,
             self.line,
             self.col_start,
             Span::new(self.start, self.current),
-            lexeme,
         )
     }
 
@@ -227,10 +226,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let token = Ok(self.create_token(
-            TokenType::Comment,
-            Some(Span::new(self.start + 2, self.current)),
-        ));
+        let token = Ok(self.create_token(TokenType::Comment));
 
         self.line += 1;
         self.current += 1;
@@ -286,7 +282,6 @@ impl<'a> Lexer<'a> {
             start_line,
             self.col_start,
             Span::new(self.start, self.current),
-            Some(Span::new(self.start + 2, self.current - 2)),
         ))
     }
 
@@ -317,10 +312,7 @@ impl<'a> Lexer<'a> {
                 self.col += next_c.len_utf8();
             }
         }
-        Ok(self.create_token(
-            TokenType::String,
-            Some(Span::new(self.start + 1, self.current - 1)),
-        ))
+        Ok(self.create_token(TokenType::String))
     }
 
     fn number(&mut self) -> Result<Token, LexerError> {
@@ -329,9 +321,7 @@ impl<'a> Lexer<'a> {
 
         loop {
             let Some(next_c) = self.source.peek().copied() else {
-                return Ok(
-                    self.create_token(TokenType::Number, Some(Span::new(self.start, self.current)))
-                );
+                return Ok(self.create_token(TokenType::Number));
             };
 
             match next_c {
@@ -367,7 +357,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Ok(self.create_token(TokenType::Number, Some(Span::new(self.start, self.current))))
+        Ok(self.create_token(TokenType::Number))
     }
 
     fn identifier(&mut self, c: char) -> Result<Token, LexerError> {
@@ -375,65 +365,62 @@ impl<'a> Lexer<'a> {
         match c {
             'a' => {
                 if self.check_keyword(self.start + 1, self.start + 3, "and") {
-                    return Ok(self.create_token(TokenType::And, None));
+                    return Ok(self.create_token(TokenType::And));
                 }
             }
             'c' => {
                 if self.check_keyword(self.start + 1, self.start + 5, "lass") {
-                    return Ok(self.create_token(TokenType::Class, None));
+                    return Ok(self.create_token(TokenType::Class));
                 }
             }
             'e' => {
                 if self.check_keyword(self.start + 1, self.start + 4, "lse") {
-                    return Ok(self.create_token(TokenType::Else, None));
+                    return Ok(self.create_token(TokenType::Else));
                 }
             }
             'i' => {
                 if self.check_keyword(self.start + 1, self.start + 2, "f") {
-                    return Ok(self.create_token(TokenType::If, None));
+                    return Ok(self.create_token(TokenType::If));
                 }
             }
             'n' => {
                 if self.check_keyword(self.start + 1, self.start + 3, "il") {
-                    return Ok(self.create_token(TokenType::Nil, None));
+                    return Ok(self.create_token(TokenType::Nil));
                 }
             }
             'o' => {
                 if self.check_keyword(self.start + 1, self.start + 2, "r") {
-                    return Ok(self.create_token(TokenType::Or, None));
+                    return Ok(self.create_token(TokenType::Or));
                 }
             }
             'p' => {
                 if self.check_keyword(self.start + 1, self.start + 5, "rint") {
-                    return Ok(self.create_token(TokenType::Print, None));
+                    return Ok(self.create_token(TokenType::Print));
                 }
             }
             'r' => {
                 if self.check_keyword(self.start + 1, self.start + 6, "eturn") {
-                    return Ok(self.create_token(TokenType::Return, None));
+                    return Ok(self.create_token(TokenType::Return));
                 }
             }
             's' => {
                 if self.check_keyword(self.start + 1, self.start + 5, "uper") {
-                    return Ok(self.create_token(TokenType::Super, None));
+                    return Ok(self.create_token(TokenType::Super));
                 }
             }
             'v' => {
                 if self.check_keyword(self.start + 1, self.start + 3, "ar") {
-                    return Ok(self.create_token(TokenType::Var, None));
+                    return Ok(self.create_token(TokenType::Var));
                 }
             }
             'w' => {
                 if self.check_keyword(self.start + 1, self.start + 5, "hile") {
-                    return Ok(self.create_token(TokenType::While, None));
+                    return Ok(self.create_token(TokenType::While));
                 }
             }
             'f' => {
                 let Some(next_c) = self.source.peek().copied() else {
-                    return Ok(self.create_token(
-                        TokenType::Identifier,
-                        Some(Span::new(self.start, self.current)),
-                    ));
+                    return Ok(self.create_token(TokenType::Identifier));
                 };
 
                 if next_c == 'a' {
@@ -441,30 +428,27 @@ impl<'a> Lexer<'a> {
                         _ = self.source.next();
                         self.current += 1;
                         self.col += 1;
-                        return Ok(self.create_token(TokenType::False, None));
+                        return Ok(self.create_token(TokenType::False));
                     }
                 } else if next_c == 'o' {
                     if self.check_keyword(self.start + 2, self.start + 3, "r") {
                         _ = self.source.next();
                         self.current += 1;
                         self.col += 1;
-                        return Ok(self.create_token(TokenType::For, None));
+                        return Ok(self.create_token(TokenType::For));
                     }
                 } else if next_c == 'u' {
                     if self.check_keyword(self.start + 2, self.start + 3, "n") {
                         _ = self.source.next();
                         self.current += 1;
                         self.col += 1;
-                        return Ok(self.create_token(TokenType::Fun, None));
+                        return Ok(self.create_token(TokenType::Fun));
                     }
                 }
             }
             't' => {
                 let Some(next_c) = self.source.peek().copied() else {
-                    return Ok(self.create_token(
-                        TokenType::Identifier,
-                        Some(Span::new(self.start, self.current)),
-                    ));
+                    return Ok(self.create_token(TokenType::Identifier));
                 };
 
                 if next_c == 'h' {
@@ -472,14 +456,14 @@ impl<'a> Lexer<'a> {
                         _ = self.source.next();
                         self.current += 1;
                         self.col += 1;
-                        return Ok(self.create_token(TokenType::This, None));
+                        return Ok(self.create_token(TokenType::This));
                     }
                 } else if next_c == 'r' {
                     if self.check_keyword(self.start + 2, self.start + 4, "ue") {
                         _ = self.source.next();
                         self.current += 1;
                         self.col += 1;
-                        return Ok(self.create_token(TokenType::True, None));
+                        return Ok(self.create_token(TokenType::True));
                     }
                 }
             }
@@ -488,10 +472,7 @@ impl<'a> Lexer<'a> {
 
         loop {
             let Some(next_c) = self.source.peek().copied() else {
-                return Ok(self.create_token(
-                    TokenType::Identifier,
-                    Some(Span::new(self.start, self.current)),
-                ));
+                return Ok(self.create_token(TokenType::Identifier));
             };
 
             match next_c {
@@ -504,10 +485,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Ok(self.create_token(
-            TokenType::Identifier,
-            Some(Span::new(self.start, self.current)),
-        ))
+        Ok(self.create_token(TokenType::Identifier))
     }
 }
 

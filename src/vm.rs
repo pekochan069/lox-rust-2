@@ -6,6 +6,7 @@ use lox_rust_2::{binary_bool_op, binary_number_op};
 
 use crate::args::Args;
 use crate::compile::compile;
+use crate::token::Span;
 use crate::value::Value;
 
 macro_rules! try_or_return {
@@ -99,10 +100,10 @@ impl Chunk {
         }
     }
 
-    pub fn write(&mut self, op: usize, loc: Loc) {
-        trace!("vm::Chunk::write(op: {op}, loc: {:?})", loc);
+    pub fn write(&mut self, op: usize, line: usize, col: usize) {
+        trace!("vm::Chunk::write(op: {op}, line: {line}, col: {col})");
         self.instructions.push(op);
-        self.loc.push(loc);
+        self.loc.push(Loc::new(line, col));
     }
 
     pub fn add_constant(&mut self, value: Value) -> usize {
@@ -128,7 +129,8 @@ pub enum InterpretResult {
 
 #[derive(Debug)]
 struct Local {
-    variables: HashMap<Rc<String>, Value>,
+    name: Span,
+    depth: usize,
 }
 
 impl Local {}
@@ -140,7 +142,6 @@ pub struct VM {
     source: String,
     globals: HashMap<Rc<String>, Value>,
     locals: Vec<Local>,
-    scope_depth: usize,
 }
 
 impl VM {
@@ -153,7 +154,6 @@ impl VM {
             source: String::new(),
             globals: HashMap::new(),
             locals: vec![],
-            scope_depth: 0,
         }
     }
 
@@ -477,8 +477,6 @@ impl VM {
         }
 
         *self.globals.get_mut(&name).unwrap() = value.clone();
-
-        println!("{:?}", self.globals);
 
         Ok(())
     }
