@@ -7,7 +7,7 @@ use crate::{
     lexer::LexerIterator,
     token::{Span, Token, TokenType},
     value::Value,
-    vm::{Chunk, Loc, OpCode},
+    vm::{Chunk, OpCode},
 };
 
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -199,6 +199,22 @@ fn get_precedence_rule(token_type: TokenType) -> Precedence {
     }
 }
 
+#[derive(Debug)]
+struct Local {
+    name: Span,
+    depth: usize,
+}
+
+impl Local {
+    pub fn new(name: Span, depth: usize) -> Self {
+        Self { name, depth }
+    }
+
+    pub fn set_depth(&mut self, depth: usize) {
+        self.depth = depth;
+    }
+}
+
 pub struct Parser<'a> {
     source: &'a str,
     tokens: Peekable<LexerIterator<'a>>,
@@ -207,6 +223,7 @@ pub struct Parser<'a> {
     had_error: bool,
     panic: bool,
     chunk: &'a mut Chunk,
+    locals: Vec<Local>,
     scope_depth: usize,
 }
 
@@ -221,6 +238,7 @@ impl<'a> Parser<'a> {
             had_error: false,
             panic: false,
             chunk,
+            locals: vec![],
             scope_depth: 0,
         }
     }
@@ -248,16 +266,16 @@ impl<'a> Parser<'a> {
 
         eprintln!(": {message}");
     }
-    fn error_at_previous(&mut self, message: &str) {
-        self.had_error = true;
-        eprint!("[{}:{}] Error", self.previous.line, self.previous.col);
+    // fn error_at_previous(&mut self, message: &str) {
+    //     self.had_error = true;
+    //     eprint!("[{}:{}] Error", self.previous.line, self.previous.col);
 
-        if self.previous.token_type == TokenType::Eof {
-            eprint!(" at end");
-        }
+    //     if self.previous.token_type == TokenType::Eof {
+    //         eprint!(" at end");
+    //     }
 
-        eprintln!(": {message}");
-    }
+    //     eprintln!(": {message}");
+    // }
 
     fn synchronize(&mut self) {
         trace!("parser::Parser::synchronize()");
@@ -297,6 +315,10 @@ impl<'a> Parser<'a> {
 
             match maybe_token {
                 Ok(token) => {
+                    if token.token_type == TokenType::Comment {
+                        continue;
+                    }
+
                     self.current = token;
                     break;
                 }
@@ -463,13 +485,24 @@ impl<'a> Parser<'a> {
 
     fn named_variable(&mut self, name: Span, can_assign: bool) {
         trace!("parser::Parser::named_variable(name: {:?}", name);
-        let arg = self.identifier_constant(name);
+        let mut arg = self.resolve_local(name.clone());
+        let get_op: OpCode;
+        let set_op: OpCode;
+
+        if arg != usize::MAX {
+            get_op = OpCode::GetLocal;
+            set_op = OpCode::SetLocal;
+        } else {
+            arg = self.identifier_constant(name);
+            get_op = OpCode::GetGlobal;
+            set_op = OpCode::SetGlobal;
+        }
 
         if can_assign && self.match_token(TokenType::Equal) {
             self.expression();
-            self.emit_ops_usize(OpCode::SetGlobal, arg);
+            self.emit_ops_usize(set_op, arg);
         } else {
-            self.emit_ops_usize(OpCode::GetGlobal, arg);
+            self.emit_ops_usize(get_op, arg);
         }
     }
 
@@ -485,23 +518,36 @@ impl<'a> Parser<'a> {
         self.identifier_constant(self.previous.literal.clone())
     }
 
-    fn declare_variable(&mut self) {}
+    fn declare_variable(&mut self) {
+        if self.scope_depth == 0 {
+            return;
+        }
+
+        let name = self.previous.literal.clone();
+
+        let has_duplicate = self
+            .locals
+            .iter()
+            .rev()
+            .take_while(|l| l.depth != usize::MAX && l.depth < self.scope_depth)
+            .any(|l| self.identifier_equal(name.clone(), l.name.clone()));
+
+        if has_duplicate {
+            self.error_at_current("Already a variable with this name in this scope.");
+        }
+
+        self.add_local(name);
+    }
+
+    fn add_local(&mut self, name: Span) {
+        self.locals.push(Local::new(name, usize::MAX));
+    }
 
     fn identifier_constant(&mut self, name: Span) -> usize {
         trace!("parser::Parser::identifier_constant(name: {:?})", name);
         self.chunk.add_constant(Value::String {
             value: Rc::new(String::from(&self.source[name.start..name.end])),
         })
-    }
-
-    fn define_variable(&mut self, global: usize) {
-        trace!("parser::Parser::define_variable(global: {global})");
-        if self.scope_depth > 0 {
-            return;
-        }
-
-        self.emit_op(OpCode::DefineGlobal);
-        self.emit_op_usize(global);
     }
 
     fn declaration(&mut self) {
@@ -520,7 +566,7 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::var_declaration()");
         self.advance();
 
-        let global = self.parse_variable("Expect variable name.");
+        let var = self.parse_variable("Expect variable name.");
 
         if self.match_token(TokenType::Equal) {
             self.expression();
@@ -530,18 +576,29 @@ impl<'a> Parser<'a> {
 
         self.consume(TokenType::Semi, "Expected ';' after variable declaration");
 
-        self.define_variable(global);
+        self.define_variable(var);
+    }
+
+    fn define_variable(&mut self, var: usize) {
+        trace!("parser::Parser::define_variable(var: {var})");
+        if self.scope_depth > 0 {
+            self.mark_initialized();
+            return;
+        }
+
+        self.emit_op(OpCode::DefineGlobal);
+        self.emit_op_usize(var);
+    }
+
+    fn mark_initialized(&mut self) {
+        self.locals.last_mut().unwrap().set_depth(self.scope_depth);
     }
 
     fn statement(&mut self) {
         trace!("parser::Parser::statement()");
         match self.current.token_type {
             TokenType::Print => self.print_statement(),
-            TokenType::LeftBrace => {
-                self.begin_scope();
-                self.block();
-                self.end_scope();
-            }
+            TokenType::LeftBrace => self.block(),
             _ => self.expression_statement(),
         }
     }
@@ -556,12 +613,16 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self) {
         trace!("parser::Parser::block()");
+        self.begin_scope();
 
+        self.advance();
         while !self.check_type(TokenType::RightBrace) && !self.check_type(TokenType::Eof) {
             self.declaration();
         }
 
         self.consume(TokenType::RightBrace, "Expected '}' after block.");
+
+        self.end_scope();
     }
 
     fn expression_statement(&mut self) {
@@ -572,10 +633,67 @@ impl<'a> Parser<'a> {
     }
 
     fn begin_scope(&mut self) {
+        trace!("parser::Parser::begin_scope()");
         self.scope_depth += 1;
     }
+
     fn end_scope(&mut self) {
+        trace!("parser::Parser::end_scope()");
         self.scope_depth -= 1;
+
+        loop {
+            if self.locals.len() == 0 {
+                break;
+            }
+
+            let local = self.locals.last().unwrap();
+
+            if local.depth <= self.scope_depth {
+                break;
+            }
+
+            self.emit_op(OpCode::Pop);
+            _ = self.locals.pop();
+        }
+    }
+
+    fn identifier_equal(&self, a: Span, b: Span) -> bool {
+        trace!("parser::Parser::identifier_equal(a: {:?}, b: {:?})", a, b);
+
+        if a.end - a.start != b.end - b.start {
+            false
+        } else if self.source[a.start..a.end] == self.source[b.start..b.end] {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn resolve_local(&mut self, name: Span) -> usize {
+        let mut error = false;
+        let resolved = self
+            .locals
+            .iter()
+            .rev()
+            .enumerate()
+            .find_map(|(i, local)| {
+                if self.identifier_equal(name.clone(), local.name.clone()) {
+                    if local.depth == 0 {
+                        error = true;
+                        None
+                    } else {
+                        Some(i)
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(usize::MAX);
+
+        if error {
+            self.error_at_current("Can't read local variable in its own initializer.");
+        }
+        resolved
     }
 }
 

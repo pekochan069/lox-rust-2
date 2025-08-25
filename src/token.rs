@@ -49,7 +49,7 @@ pub enum TokenType {
     While,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

@@ -39,6 +39,8 @@ pub enum OpCode {
     DefineGlobal,
     GetGlobal,
     SetGlobal,
+    GetLocal,
+    SetLocal,
     Unknown,
 }
 
@@ -65,6 +67,8 @@ impl OpCode {
             16 => Self::DefineGlobal,
             17 => Self::GetGlobal,
             18 => Self::SetGlobal,
+            19 => Self::GetLocal,
+            20 => Self::SetLocal,
             _ => Self::Unknown,
         }
     }
@@ -127,21 +131,12 @@ pub enum InterpretResult {
     RuntimeError,
 }
 
-#[derive(Debug)]
-struct Local {
-    name: Span,
-    depth: usize,
-}
-
-impl Local {}
-
 pub struct VM {
     pub chunk: Chunk,
     cursor: usize,
     stack: Vec<Value>,
     source: String,
     globals: HashMap<Rc<String>, Value>,
-    locals: Vec<Local>,
 }
 
 impl VM {
@@ -153,7 +148,6 @@ impl VM {
             stack: vec![],
             source: String::new(),
             globals: HashMap::new(),
-            locals: vec![],
         }
     }
 
@@ -180,6 +174,7 @@ impl VM {
 impl VM {
     fn run(&mut self) -> InterpretResult {
         trace!("vm::VM::run()");
+
         loop {
             #[cfg(feature = "trace_execution")]
             {
@@ -224,6 +219,8 @@ impl VM {
                 OpCode::DefineGlobal => try_or_return!(self.define_global()),
                 OpCode::GetGlobal => try_or_return!(self.get_global()),
                 OpCode::SetGlobal => try_or_return!(self.set_global()),
+                OpCode::GetLocal => try_or_return!(self.get_local()),
+                OpCode::SetLocal => try_or_return!(self.set_local()),
                 OpCode::Unknown => return InterpretResult::CompileError,
             }
 
@@ -477,6 +474,26 @@ impl VM {
         }
 
         *self.globals.get_mut(&name).unwrap() = value.clone();
+
+        Ok(())
+    }
+
+    fn get_local(&mut self) -> Result<(), InterpretResult> {
+        let Some(slot) = self.next() else {
+            return Err(self.runtime_error("Cannot get slot for local variable."));
+        };
+
+        self.push_value(self.peek_value_at(slot).unwrap().clone());
+
+        Ok(())
+    }
+
+    fn set_local(&mut self) -> Result<(), InterpretResult> {
+        let Some(slot) = self.next() else {
+            return Err(self.runtime_error("Cannot get slot for local variable."));
+        };
+
+        self.stack[slot] = self.peek_value_at(0).unwrap().clone();
 
         Ok(())
     }
