@@ -42,6 +42,8 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> usize {
         OpCode::SetGlobal => constant_instruction("OP_SET_GLOBAL", &chunk, offset),
         OpCode::GetLocal => byte_instruction("OP_GET_LOCAL", &chunk, offset),
         OpCode::SetLocal => byte_instruction("OP_SET_LOCAL", &chunk, offset),
+        OpCode::JumpIfFalse => jump_instruction("OP_JUMP_IF_FALSE", &chunk, 1, offset),
+        OpCode::Jump => jump_instruction("OP_JUMP", &chunk, 1, offset),
         OpCode::Unknown => {
             println!("Unknown opcode {:?}", instruction);
             offset + 1
@@ -58,8 +60,7 @@ pub fn constant_instruction(instruction: &str, chunk: &Chunk, offset: usize) -> 
     let constant = chunk.instructions[offset + 1];
     let value = &chunk.constants[constant];
 
-    print!("{instruction} {constant:0>4} {}", value);
-    println!();
+    println!("{instruction} {constant:0>4} {}", value);
     offset + 2
 }
 
@@ -67,5 +68,12 @@ pub fn byte_instruction(instruction: &str, chunk: &Chunk, offset: usize) -> usiz
     let slot = chunk.instructions[offset + 1];
 
     println!("{instruction} {slot:0>4}");
+    offset + 2
+}
+
+pub fn jump_instruction(instruction: &str, chunk: &Chunk, sign: usize, offset: usize) -> usize {
+    let jump = chunk.instructions[offset + 1];
+
+    println!("{instruction} {offset} -> {}", offset + 2 + sign * jump);
     offset + 2
 }

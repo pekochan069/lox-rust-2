@@ -56,6 +56,8 @@ enum ParseFn {
     Literal,
     String,
     Variable,
+    And,
+    Or,
 }
 
 fn get_prefix_rule(token_type: TokenType) -> ParseFn {
@@ -130,7 +132,7 @@ fn get_infix_rule(token_type: TokenType) -> ParseFn {
         TokenType::Identifier => ParseFn::None,
         TokenType::String => ParseFn::None,
         TokenType::Number => ParseFn::None,
-        TokenType::And => ParseFn::None,
+        TokenType::And => ParseFn::And,
         TokenType::Class => ParseFn::None,
         TokenType::Else => ParseFn::None,
         TokenType::False => ParseFn::None,
@@ -138,7 +140,7 @@ fn get_infix_rule(token_type: TokenType) -> ParseFn {
         TokenType::Fun => ParseFn::None,
         TokenType::If => ParseFn::None,
         TokenType::Nil => ParseFn::None,
-        TokenType::Or => ParseFn::None,
+        TokenType::Or => ParseFn::Or,
         TokenType::Print => ParseFn::None,
         TokenType::Return => ParseFn::None,
         TokenType::Super => ParseFn::None,
@@ -177,7 +179,7 @@ fn get_precedence_rule(token_type: TokenType) -> Precedence {
         TokenType::Identifier => Precedence::None,
         TokenType::String => Precedence::None,
         TokenType::Number => Precedence::None,
-        TokenType::And => Precedence::None,
+        TokenType::And => Precedence::And,
         TokenType::Class => Precedence::None,
         TokenType::Else => Precedence::None,
         TokenType::False => Precedence::None,
@@ -185,7 +187,7 @@ fn get_precedence_rule(token_type: TokenType) -> Precedence {
         TokenType::Fun => Precedence::None,
         TokenType::If => Precedence::None,
         TokenType::Nil => Precedence::None,
-        TokenType::Or => Precedence::None,
+        TokenType::Or => Precedence::Or,
         TokenType::Print => Precedence::None,
         TokenType::Return => Precedence::None,
         TokenType::Super => Precedence::None,
@@ -400,6 +402,8 @@ impl<'a> Parser<'a> {
             ParseFn::Literal => self.literal(),
             ParseFn::String => self.string(),
             ParseFn::Variable => self.variable(can_assign),
+            ParseFn::And => self.and(),
+            ParseFn::Or => self.or(),
             ParseFn::None => {}
         }
     }
@@ -483,6 +487,27 @@ impl<'a> Parser<'a> {
         self.named_variable(self.previous.literal.clone(), can_assign);
     }
 
+    fn and(&mut self) {
+        trace!("parser::Parser::and()");
+
+        let end_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
+        self.parse_precedence(Precedence::And);
+        self.patch_jump(end_jump);
+    }
+
+    fn or(&mut self) {
+        trace!("parser::Parser::or()");
+
+        let else_jump = self.emit_jump(OpCode::JumpIfFalse);
+        let end_jump = self.emit_jump(OpCode::Jump);
+
+        self.patch_jump(else_jump);
+        self.emit_op(OpCode::Pop);
+        self.parse_precedence(Precedence::Or);
+        self.patch_jump(end_jump);
+    }
+
     fn named_variable(&mut self, name: Span, can_assign: bool) {
         trace!("parser::Parser::named_variable(name: {:?}", name);
         let mut arg = self.resolve_local(name.clone());
@@ -519,6 +544,7 @@ impl<'a> Parser<'a> {
     }
 
     fn declare_variable(&mut self) {
+        trace!("parser::Parser::declare_variable()");
         if self.scope_depth == 0 {
             return;
         }
@@ -540,6 +566,7 @@ impl<'a> Parser<'a> {
     }
 
     fn add_local(&mut self, name: Span) {
+        trace!("parser::Parser::add_local(name: {:?})", name);
         self.locals.push(Local::new(name, usize::MAX));
     }
 
@@ -591,6 +618,7 @@ impl<'a> Parser<'a> {
     }
 
     fn mark_initialized(&mut self) {
+        trace!("parser::Parser::mark_initialized()");
         self.locals.last_mut().unwrap().set_depth(self.scope_depth);
     }
 
@@ -598,6 +626,7 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::statement()");
         match self.current.token_type {
             TokenType::Print => self.print_statement(),
+            TokenType::If => self.if_statement(),
             TokenType::LeftBrace => self.block(),
             _ => self.expression_statement(),
         }
@@ -670,6 +699,7 @@ impl<'a> Parser<'a> {
     }
 
     fn resolve_local(&mut self, name: Span) -> usize {
+        trace!("parser::Parser::resolve_local(name: {:?})", name);
         let mut error = false;
         let resolved = self
             .locals
@@ -694,6 +724,27 @@ impl<'a> Parser<'a> {
             self.error_at_current("Can't read local variable in its own initializer.");
         }
         resolved
+    }
+
+    fn if_statement(&mut self) {
+        trace!("parser::Parser::if_statement()");
+        self.advance();
+
+        self.consume(TokenType::LeftParen, "Expected '(' after 'if'.");
+        self.expression();
+        self.consume(TokenType::RightParen, "Expected '(' after 'if'.");
+
+        let then_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
+        self.statement();
+        self.patch_jump(then_jump);
+        self.emit_op(OpCode::Pop);
+
+        let else_jump = self.emit_jump(OpCode::Jump);
+        if self.match_token(TokenType::Else) {
+            self.statement();
+        }
+        self.patch_jump(else_jump);
     }
 }
 
@@ -726,5 +777,19 @@ impl<'a> Parser<'a> {
         let pos = self.chunk.add_constant(value);
         self.emit_op(OpCode::Constant);
         self.emit_op_usize(pos);
+    }
+
+    fn emit_jump(&mut self, op: OpCode) -> usize {
+        trace!("parser::Parser::emit_jump({:?})", op);
+        self.emit_op(op);
+        self.emit_op_usize(usize::MAX);
+        self.chunk.instructions.len() - 1
+    }
+
+    fn patch_jump(&mut self, offset: usize) {
+        trace!("parser::Parser::patch_jump(offset: {offset})");
+        let jump = self.chunk.instructions.len() - offset - 2;
+
+        self.chunk.instructions[offset] = jump;
     }
 }

@@ -41,6 +41,8 @@ pub enum OpCode {
     SetGlobal,
     GetLocal,
     SetLocal,
+    JumpIfFalse,
+    Jump,
     Unknown,
 }
 
@@ -69,6 +71,8 @@ impl OpCode {
             18 => Self::SetGlobal,
             19 => Self::GetLocal,
             20 => Self::SetLocal,
+            21 => Self::JumpIfFalse,
+            22 => Self::Jump,
             _ => Self::Unknown,
         }
     }
@@ -221,6 +225,8 @@ impl VM {
                 OpCode::SetGlobal => try_or_return!(self.set_global()),
                 OpCode::GetLocal => try_or_return!(self.get_local()),
                 OpCode::SetLocal => try_or_return!(self.set_local()),
+                OpCode::JumpIfFalse => try_or_return!(self.jump_if_false()),
+                OpCode::Jump => self.jump(),
                 OpCode::Unknown => return InterpretResult::CompileError,
             }
 
@@ -479,6 +485,7 @@ impl VM {
     }
 
     fn get_local(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::get_local()");
         let Some(slot) = self.next() else {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
@@ -489,6 +496,7 @@ impl VM {
     }
 
     fn set_local(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::set_local()");
         let Some(slot) = self.next() else {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
@@ -496,6 +504,30 @@ impl VM {
         self.stack[slot] = self.peek_value_at(0).unwrap().clone();
 
         Ok(())
+    }
+
+    fn jump_if_false(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::jump_if_false()");
+
+        let offset = self.chunk.instructions[self.cursor];
+        self.cursor += 1;
+
+        let Some(predicate) = self.peek_value_at(0) else {
+            return Err(self.runtime_error("Invalid predicate."));
+        };
+
+        if predicate.is_falsy() {
+            self.cursor += offset;
+        }
+
+        Ok(())
+    }
+
+    fn jump(&mut self) {
+        trace!("vm::VM::jump()");
+
+        let offset = self.chunk.instructions[self.cursor];
+        self.cursor += offset + 1;
     }
 }
 
