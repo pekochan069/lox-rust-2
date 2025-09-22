@@ -732,15 +732,16 @@ impl<'a> Parser<'a> {
 
         self.consume(TokenType::LeftParen, "Expected '(' after 'if'.");
         self.expression();
-        self.consume(TokenType::RightParen, "Expected '(' after 'if'.");
+        self.consume(TokenType::RightParen, "Expected ')' after condition.");
 
         let then_jump = self.emit_jump(OpCode::JumpIfFalse);
         self.emit_op(OpCode::Pop);
         self.statement();
+
+        let else_jump = self.emit_jump(OpCode::Jump);
         self.patch_jump(then_jump);
         self.emit_op(OpCode::Pop);
 
-        let else_jump = self.emit_jump(OpCode::Jump);
         if self.match_token(TokenType::Else) {
             self.statement();
         }
@@ -788,8 +789,8 @@ impl<'a> Parser<'a> {
 
     fn patch_jump(&mut self, offset: usize) {
         trace!("parser::Parser::patch_jump(offset: {offset})");
-        let jump = self.chunk.instructions.len() - offset - 2;
-
+        // Distance from the operand to the next instruction after the jump target
+        let jump = self.chunk.instructions.len() - offset - 1;
         self.chunk.instructions[offset] = jump;
     }
 }
