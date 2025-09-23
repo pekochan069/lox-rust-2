@@ -627,6 +627,8 @@ impl<'a> Parser<'a> {
         match self.current.token_type {
             TokenType::Print => self.print_statement(),
             TokenType::If => self.if_statement(),
+            TokenType::While => self.while_statement(),
+            TokenType::For => self.for_statement(),
             TokenType::LeftBrace => self.block(),
             _ => self.expression_statement(),
         }
@@ -747,6 +749,66 @@ impl<'a> Parser<'a> {
         }
         self.patch_jump(else_jump);
     }
+
+    fn while_statement(&mut self) {
+        trace!("parser::Parser::while_statement()");
+        self.advance();
+
+        let loop_start = self.chunk.len();
+
+        self.consume(TokenType::LeftParen, "Expected '(' after 'while'.");
+        self.expression();
+        self.consume(TokenType::RightParen, "Expected ')' after condition.");
+
+        let exit_jump = self.emit_jump(OpCode::JumpIfFalse);
+        self.emit_op(OpCode::Pop);
+        self.statement();
+        self.emit_loop(loop_start);
+
+        self.patch_jump(exit_jump);
+        self.emit_op(OpCode::Pop);
+    }
+
+    fn for_statement(&mut self) {
+        trace!("parser::Parser::for_loop()");
+        self.advance();
+
+        self.begin_scope();
+
+        self.consume(TokenType::LeftParen, "Expected '(' after 'for'.");
+
+        if self.match_token(TokenType::Semi) {
+            self.advance();
+        } else if self.match_token(TokenType::Var) {
+            self.var_declaration();
+        } else {
+            self.expression_statement();
+        }
+
+        let loop_start = self.chunk.len();
+        self.consume(
+            TokenType::Semi,
+            "Expected ';' after loop variable condition.",
+        );
+        //
+
+        self.consume(TokenType::RightParen, "Expected ')' after condition.");
+
+        self.statement();
+        self.emit_loop(loop_start);
+
+        self.end_scope();
+    }
+
+    fn emit_loop(&mut self, loop_start: usize) {
+        trace!("parser::Parser::emit_loop(loop_start: {loop_start})");
+
+        self.emit_op(OpCode::Loop);
+
+        let offset = self.chunk.len() - loop_start;
+
+        self.emit_op_usize(offset);
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -784,13 +846,13 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::emit_jump({:?})", op);
         self.emit_op(op);
         self.emit_op_usize(usize::MAX);
-        self.chunk.instructions.len() - 1
+        self.chunk.len() - 1
     }
 
     fn patch_jump(&mut self, offset: usize) {
         trace!("parser::Parser::patch_jump(offset: {offset})");
         // Distance from the operand to the next instruction after the jump target
-        let jump = self.chunk.instructions.len() - offset - 1;
+        let jump = self.chunk.len() - offset - 1;
         self.chunk.instructions[offset] = jump;
     }
 }

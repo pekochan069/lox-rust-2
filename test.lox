@@ -1,6 +1,3 @@
-var a = false;
-if (a) {
-    print "true";
-} else {
-    print "false";
+for (;;) {
+    print "Hello, World!";
 }

@@ -43,6 +43,7 @@ pub enum OpCode {
     SetLocal,
     JumpIfFalse,
     Jump,
+    Loop,
     Unknown,
 }
 
@@ -73,6 +74,7 @@ impl OpCode {
             20 => Self::SetLocal,
             21 => Self::JumpIfFalse,
             22 => Self::Jump,
+            23 => Self::Loop,
             _ => Self::Unknown,
         }
     }
@@ -125,6 +127,11 @@ impl Chunk {
         self.instructions.clear();
         self.constants.clear();
         self.loc.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        trace!("vm::Chunk::len()");
+        self.instructions.len()
     }
 }
 
@@ -227,6 +234,7 @@ impl VM {
                 OpCode::SetLocal => try_or_return!(self.set_local()),
                 OpCode::JumpIfFalse => try_or_return!(self.jump_if_false()),
                 OpCode::Jump => self.jump(),
+                OpCode::Loop => self.loop_op(),
                 OpCode::Unknown => return InterpretResult::CompileError,
             }
 
@@ -528,6 +536,13 @@ impl VM {
 
         let offset = self.chunk.instructions[self.cursor];
         self.cursor += offset + 1;
+    }
+
+    fn loop_op(&mut self) {
+        trace!("vm::VM::loop_op()");
+
+        let offset = self.chunk.instructions[self.cursor];
+        self.cursor -= offset;
     }
 }
 
