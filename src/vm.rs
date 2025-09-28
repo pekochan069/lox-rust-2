@@ -6,8 +6,11 @@ use lox_rust_2::{binary_bool_op, binary_number_op};
 
 use crate::args::Args;
 use crate::compile::compile;
-use crate::token::Span;
+use crate::function::{self, Function};
+use crate::parser::CompileFrame;
 use crate::value::Value;
+
+static MAX_FRAMES: usize = 255;
 
 macro_rules! try_or_return {
     ($expr:expr) => {
@@ -44,6 +47,7 @@ pub enum OpCode {
     JumpIfFalse,
     Jump,
     Loop,
+    Call,
     Unknown,
 }
 
@@ -75,6 +79,7 @@ impl OpCode {
             21 => Self::JumpIfFalse,
             22 => Self::Jump,
             23 => Self::Loop,
+            24 => Self::Call,
             _ => Self::Unknown,
         }
     }
@@ -93,7 +98,7 @@ impl Loc {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Chunk {
     pub instructions: Vec<usize>,
     pub constants: Vec<Value>,
@@ -136,6 +141,27 @@ impl Chunk {
 }
 
 #[derive(Debug)]
+pub struct CallFrame {
+    function: Function,
+    cursor: usize,
+    slots: Vec<Value>,
+}
+
+impl CallFrame {
+    pub fn new(function: Function, cursor: usize, slots: Vec<Value>) -> Self {
+        Self {
+            function,
+            cursor,
+            slots,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+    }
+}
+
+#[derive(Debug)]
 pub enum InterpretResult {
     Ok,
     CompileError,
@@ -143,40 +169,41 @@ pub enum InterpretResult {
 }
 
 pub struct VM {
-    pub chunk: Chunk,
-    cursor: usize,
     stack: Vec<Value>,
     source: String,
     globals: HashMap<Rc<String>, Value>,
+    frames: Vec<CallFrame>,
 }
 
 impl VM {
     pub fn new(args: &Args) -> Self {
         trace!("vm::VM::new(args: {:?})", args);
+
         Self {
-            chunk: Chunk::new(),
-            cursor: 0,
             stack: vec![],
             source: String::new(),
             globals: HashMap::new(),
+            frames: vec![],
         }
     }
 
     pub fn free(&mut self) {
         trace!("vm::VM::free()");
-        self.chunk.clear();
+        self.frames.clear();
         self.stack.clear();
         self.globals.clear();
     }
 
     pub fn interpret(&mut self, source: String) -> InterpretResult {
         trace!("vm::VM::interpret()");
-        self.source = source;
-        self.cursor = 0;
 
-        let Ok(_ew_chunk) = compile(self.source.as_str(), &mut self.chunk) else {
+        self.source = source;
+
+        let Ok(function) = compile(self.source.as_str()) else {
             return InterpretResult::CompileError;
         };
+
+        self.frames.push(CallFrame::new(function, 0, vec![]));
 
         self.run()
     }
@@ -190,7 +217,7 @@ impl VM {
             #[cfg(feature = "trace_execution")]
             {
                 // disassemble
-                crate::debug::disassemble_instruction(&self.chunk, self.cursor);
+                crate::debug::disassemble_instruction(self.current_chunk(), self.current_cursor());
 
                 // stack trace
                 if self.stack.len() > 0 {
@@ -207,7 +234,18 @@ impl VM {
             };
 
             match instruction {
-                OpCode::Return => return InterpretResult::Ok,
+                OpCode::Return => {
+                    let result = self.return_op();
+
+                    match result {
+                        Ok(interpret_finished) => {
+                            if interpret_finished {
+                                return InterpretResult::Ok;
+                            }
+                        }
+                        Err(e) => return e,
+                    }
+                }
                 OpCode::Constant => try_or_return!(self.constant()),
                 OpCode::Negate => try_or_return!(self.negate()),
                 OpCode::Not => try_or_return!(self.not()),
@@ -235,10 +273,11 @@ impl VM {
                 OpCode::JumpIfFalse => try_or_return!(self.jump_if_false()),
                 OpCode::Jump => self.jump(),
                 OpCode::Loop => self.loop_op(),
+                OpCode::Call => try_or_return!(self.call_op()),
                 OpCode::Unknown => return InterpretResult::CompileError,
             }
 
-            if self.cursor == self.chunk.instructions.len() {
+            if self.current_cursor() == self.current_instructions().len() {
                 break;
             }
         }
@@ -248,24 +287,81 @@ impl VM {
 
     fn next(&mut self) -> Option<usize> {
         trace!("vm::VM::next()");
-        if self.chunk.instructions.len() == 0 {
+        let frame = self.current_frame_mut();
+        if frame.function.chunk.instructions.len() == 0 {
             None
         } else {
-            let instruction = self.chunk.instructions[self.cursor];
-            self.cursor += 1;
+            let instruction = frame.function.chunk.instructions[frame.cursor];
+            frame.cursor += 1;
             Some(instruction)
         }
     }
 
     fn next_opcode(&mut self) -> Option<OpCode> {
         trace!("VM::next_opcode()");
-        if self.chunk.instructions.len() == 0 {
+        let frame = self.current_frame_mut();
+        if frame.function.chunk.instructions.len() == 0 {
             None
         } else {
-            let instruction = OpCode::from_usize(self.chunk.instructions[self.cursor]);
-            self.cursor += 1;
+            let instruction = OpCode::from_usize(frame.function.chunk.instructions[frame.cursor]);
+            frame.cursor += 1;
             Some(instruction)
         }
+    }
+
+    fn current_frame(&self) -> &CallFrame {
+        self.frames.last().unwrap()
+    }
+
+    fn current_frame_mut(&mut self) -> &mut CallFrame {
+        self.frames.last_mut().unwrap()
+    }
+
+    fn current_cursor(&self) -> usize {
+        self.frames.last().unwrap().cursor
+    }
+
+    fn current_slots(&self) -> &Vec<Value> {
+        &self.frames.last().unwrap().slots
+    }
+
+    fn current_slots_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.frames.last_mut().unwrap().slots
+    }
+
+    fn current_function(&self) -> &Function {
+        let frame = self.frames.last().unwrap();
+        &frame.function
+    }
+
+    fn current_function_mut(&mut self) -> &mut Function {
+        let frame = self.frames.last_mut().unwrap();
+        &mut frame.function
+    }
+
+    fn current_chunk(&self) -> &Chunk {
+        let function = &(self.frames.last().unwrap().function);
+        &function.chunk
+    }
+
+    fn current_chunk_mut(&mut self) -> &mut Chunk {
+        let function = &mut (self.frames.last_mut().unwrap().function);
+        &mut function.chunk
+    }
+
+    fn current_instructions(&self) -> &Vec<usize> {
+        let chunk = &(self.frames.last().unwrap().function.chunk);
+        &chunk.instructions
+    }
+
+    fn current_instructions_mut(&mut self) -> &mut Vec<usize> {
+        let chunk = &mut (self.frames.last_mut().unwrap().function.chunk);
+        &mut chunk.instructions
+    }
+
+    fn current_instruction(&self) -> usize {
+        trace!("vm::VM::currrent_instruction()");
+        self.current_instructions()[self.current_cursor()]
     }
 
     fn push_value(&mut self, value: Value) {
@@ -278,12 +374,12 @@ impl VM {
         self.stack.pop()
     }
 
-    fn top_value(&mut self) -> Option<Value> {
+    fn top_value(&mut self) -> Option<&Value> {
         trace!("vm::VM::top_value()");
         if self.stack.len() == 0 {
             None
         } else {
-            Some(self.stack[self.stack.len() - 1].clone())
+            Some(&self.stack[self.stack.len() - 1])
         }
     }
 
@@ -301,7 +397,7 @@ impl VM {
             return Err(());
         };
 
-        let value = self.chunk.constants[constant_location].clone();
+        let value = self.current_chunk().constants[constant_location].clone();
 
         Ok(value)
     }
@@ -498,7 +594,7 @@ impl VM {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
 
-        self.push_value(self.peek_value_at(slot).unwrap().clone());
+        self.push_value(self.current_slots()[slot].clone());
 
         Ok(())
     }
@@ -509,7 +605,9 @@ impl VM {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
 
-        self.stack[slot] = self.peek_value_at(0).unwrap().clone();
+        let value = self.peek_value_at(0).unwrap().clone();
+
+        self.current_slots_mut()[slot] = value;
 
         Ok(())
     }
@@ -517,15 +615,17 @@ impl VM {
     fn jump_if_false(&mut self) -> Result<(), InterpretResult> {
         trace!("vm::VM::jump_if_false()");
 
-        let offset = self.chunk.instructions[self.cursor];
-        self.cursor += 1;
+        let offset = self.current_instruction();
+        {
+            self.current_frame_mut().cursor += 1;
+        }
 
         let Some(predicate) = self.peek_value_at(0) else {
             return Err(self.runtime_error("Invalid predicate."));
         };
 
         if predicate.is_falsy() {
-            self.cursor += offset;
+            self.current_frame_mut().cursor += offset;
         }
 
         Ok(())
@@ -534,22 +634,151 @@ impl VM {
     fn jump(&mut self) {
         trace!("vm::VM::jump()");
 
-        let offset = self.chunk.instructions[self.cursor];
-        self.cursor += offset + 1;
+        let offset = self.current_instruction();
+        self.current_frame_mut().cursor += offset + 1;
     }
 
     fn loop_op(&mut self) {
         trace!("vm::VM::loop_op()");
 
-        let offset = self.chunk.instructions[self.cursor];
-        self.cursor -= offset;
+        let offset = self.current_instruction();
+        self.current_frame_mut().cursor -= offset;
+    }
+
+    fn call_op(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::call()");
+
+        let arg_count = self.current_instruction();
+        self.current_frame_mut().cursor += 1;
+
+        let value = self
+            .peek_value_at(arg_count)
+            .expect("Invalid access to stack.")
+            .clone();
+
+        if !self.call_value(value, arg_count) {
+            return Err(InterpretResult::RuntimeError);
+        }
+
+        Ok(())
+    }
+
+    fn call_value(&mut self, value: Value, arg_count: usize) -> bool {
+        trace!("vm::VM::call_value(value: {value}, arg_count: {arg_count})");
+        match value {
+            Value::Function { value } => self.call(value, arg_count),
+            Value::NativeFn { value } => {
+                let start = self
+                    .current_slots()
+                    .len()
+                    .saturating_sub(self.stack.len() - arg_count - 1);
+                let slots = self.current_slots()[start..].to_vec();
+                let result = self.invoke_native(value, arg_count, slots);
+
+                for _ in 0..=arg_count {
+                    self.stack.pop();
+                }
+
+                self.push_value(result);
+
+                false
+            }
+            _ => {
+                _ = self.runtime_error("Can only call functions and classes.");
+                false
+            }
+        }
+    }
+
+    fn call(&mut self, function: Function, arg_count: usize) -> bool {
+        trace!("vm::VM::call(function, arg_count: {arg_count})");
+        if function.arity != arg_count {
+            let message = format!(
+                "Expected {} arguments but got {}.",
+                function.arity, arg_count
+            );
+            _ = self.runtime_error(message.as_str());
+            return false;
+        }
+
+        if self.frames.len() == MAX_FRAMES {
+            _ = self.runtime_error("Stack overflow.");
+            return false;
+        }
+
+        let start = self
+            .current_slots()
+            .len()
+            .saturating_sub(self.stack.len() - arg_count - 1);
+        let frame = CallFrame::new(function, 0, self.current_slots()[start..].to_vec());
+        self.frames.push(frame);
+
+        true
+    }
+
+    fn return_op(&mut self) -> Result<bool, InterpretResult> {
+        trace!("vm::VM::return_op()");
+        let Some(result) = self.pop_value() else {
+            return Err(self.runtime_error("Invalid access to stack."));
+        };
+
+        self.frames.pop();
+
+        if self.frames.len() == 0 {
+            self.pop_value();
+            return Ok(true);
+        }
+
+        let slots = self.current_slots().clone();
+
+        self.stack.extend(slots);
+
+        self.push_value(result);
+
+        Ok(false)
+    }
+
+    fn define_native(&mut self, name: &str, function: Function) {
+        self.push_value(Value::String {
+            value: Rc::new(String::from(name)),
+        });
+        self.push_value(Value::NativeFn { value: function });
+        let name = self.peek_value_at(0).unwrap();
+        let function = self.peek_value_at(1).unwrap();
+
+        match name {
+            Value::String { value: name } => {
+                self.globals.insert(name.clone(), function.clone());
+            }
+            _ => {}
+        }
+
+        self.pop_value();
+        self.pop_value();
+    }
+
+    fn invoke_native(&self, function: Function, arg_count: usize, slots: Vec<Value>) -> Value {
+        Value::Nil
     }
 }
 
 impl VM {
     fn runtime_error(&self, message: &str) -> InterpretResult {
-        let loc = self.chunk.loc[self.cursor].clone();
+        let loc = self.current_chunk().loc[self.current_cursor()].clone();
         eprintln!("[{}:{}] {message}", loc.line, loc.col);
+
+        for frame in self.frames.iter() {
+            let function = &frame.function;
+            let instruction = frame.cursor - 1;
+            let loc = function.chunk.loc[instruction].clone();
+            eprint!("[line {}] in ", loc.line);
+
+            match &function.name {
+                Some(name) => eprintln!("{}", name),
+                None => eprintln!("script"),
+            }
+        }
+
         InterpretResult::RuntimeError
     }
 }

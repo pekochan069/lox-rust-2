@@ -1,11 +1,15 @@
 use std::{fmt, rc::Rc};
 
+use crate::function::Function;
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Bool { value: bool },
     Number { value: f64 },
     Nil,
     String { value: Rc<String> },
+    Function { value: Function },
+    NativeFn { value: Function },
 }
 
 impl Value {
@@ -15,6 +19,8 @@ impl Value {
             Self::Number { value: _ } => false,
             Self::Nil => true,
             Self::String { value: _ } => false,
+            Self::Function { value: _ } => false,
+            Self::NativeFn { value: _ } => false,
         }
     }
 
@@ -36,6 +42,18 @@ impl fmt::Display for Value {
             Self::Number { value } => write!(f, "{value}"),
             Self::Nil => write!(f, "nil"),
             Self::String { value } => write!(f, "{value}"),
+            Self::Function { value } => {
+                let name = &value.name;
+
+                match name {
+                    Some(name) => write!(f, "<fn {name}>"),
+                    None => write!(f, "<script>"),
+                }
+            }
+            Self::NativeFn { value } => {
+                let name = value.name.clone().unwrap();
+                write!(f, "<native fn {name}>")
+            }
         }
     }
 }

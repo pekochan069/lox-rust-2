@@ -3,6 +3,7 @@ mod args;
 mod compile;
 mod debug;
 mod error;
+mod function;
 mod lexer;
 mod logger;
 mod parser;

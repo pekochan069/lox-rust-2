@@ -1,15 +1,15 @@
 use log::trace;
 
 use crate::error::LoxError;
+use crate::function::Function;
 use crate::lexer::Lexer;
-use crate::parser::Parser;
-use crate::vm::Chunk;
+use crate::parser::{CompileFrame, Parser};
 
-pub fn compile<'a>(source: &'a str, chunk: &mut Chunk) -> Result<(), LoxError> {
-    trace!("compile::compile(source, chunk: {:?}", chunk);
+pub fn compile<'a>(source: &'a str) -> Result<Function, LoxError> {
+    trace!("compile::compile(source)");
     let mut lexer = Lexer::new(source);
-    let mut parser = Parser::new(source, lexer.iter().peekable(), chunk);
-    _ = parser.parse()?;
+    let mut parser = Parser::new(source, lexer.iter().peekable());
+    let frame = parser.parse()?;
 
-    Ok(())
+    Ok(frame)
 }

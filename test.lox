@@ -1,3 +1,5 @@
-for (;;) {
-    print "Hello, World!";
+fun hello() {
+    return "Hello, world!";
 }
+
+print hello();

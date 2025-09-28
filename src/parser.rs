@@ -2,8 +2,12 @@ use std::{iter::Peekable, rc::Rc};
 
 use log::trace;
 
+#[cfg(feature = "trace_execution")]
+use crate::debug::disassemble_chunk;
+
 use crate::{
     error::ParserError,
+    function::{Function, FunctionType},
     lexer::LexerIterator,
     token::{Span, Token, TokenType},
     value::Value,
@@ -58,6 +62,7 @@ enum ParseFn {
     Variable,
     And,
     Or,
+    Call,
 }
 
 fn get_prefix_rule(token_type: TokenType) -> ParseFn {
@@ -110,7 +115,7 @@ fn get_prefix_rule(token_type: TokenType) -> ParseFn {
 fn get_infix_rule(token_type: TokenType) -> ParseFn {
     trace!("parser::infix_rule(token_type: {:?})", token_type);
     match token_type {
-        TokenType::LeftParen => ParseFn::None,
+        TokenType::LeftParen => ParseFn::Call,
         TokenType::RightParen => ParseFn::None,
         TokenType::LeftBrace => ParseFn::None,
         TokenType::RightBrace => ParseFn::None,
@@ -157,7 +162,7 @@ fn get_infix_rule(token_type: TokenType) -> ParseFn {
 fn get_precedence_rule(token_type: TokenType) -> Precedence {
     trace!("parser::precedence_rule(token_type: {:?})", token_type);
     match token_type {
-        TokenType::LeftParen => Precedence::None,
+        TokenType::LeftParen => Precedence::Call,
         TokenType::RightParen => Precedence::None,
         TokenType::LeftBrace => Precedence::None,
         TokenType::RightBrace => Precedence::None,
@@ -202,7 +207,7 @@ fn get_precedence_rule(token_type: TokenType) -> Precedence {
 }
 
 #[derive(Debug)]
-struct Local {
+pub struct Local {
     name: Span,
     depth: usize,
 }
@@ -217,6 +222,39 @@ impl Local {
     }
 }
 
+#[derive(Debug)]
+pub struct CompileFrame {
+    pub function: Function,
+    pub function_type: FunctionType,
+    pub slots: Vec<Value>,
+    pub locals: Vec<Local>,
+    pub scope_depth: usize,
+}
+
+impl CompileFrame {
+    pub fn new(
+        function: Function,
+        function_type: FunctionType,
+        slots: Vec<Value>,
+        locals: Vec<Local>,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            function,
+            function_type,
+            slots,
+            locals,
+            scope_depth,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.locals.clear();
+        self.function.chunk.clear();
+    }
+}
+
 pub struct Parser<'a> {
     source: &'a str,
     tokens: Peekable<LexerIterator<'a>>,
@@ -224,14 +262,21 @@ pub struct Parser<'a> {
     current: Token,
     had_error: bool,
     panic: bool,
-    chunk: &'a mut Chunk,
-    locals: Vec<Local>,
-    scope_depth: usize,
+    frames: Vec<CompileFrame>,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(source: &'a str, tokens: Peekable<LexerIterator<'a>>, chunk: &'a mut Chunk) -> Self {
-        trace!("parser::Parser::new(source, tokens, chunk: {:?})", chunk);
+    pub fn new(source: &'a str, tokens: Peekable<LexerIterator<'a>>) -> Self {
+        trace!("parser::Parser::new(source, tokens)");
+
+        let root_frame = CompileFrame::new(
+            Function::new(0, Chunk::new(), None),
+            FunctionType::Script,
+            vec![],
+            vec![],
+            0,
+        );
+
         Self {
             source,
             tokens,
@@ -239,13 +284,11 @@ impl<'a> Parser<'a> {
             current: Token::new(TokenType::Error, 0, 0, Span::new(0, 0)),
             had_error: false,
             panic: false,
-            chunk,
-            locals: vec![],
-            scope_depth: 0,
+            frames: vec![root_frame],
         }
     }
 
-    pub fn parse(&mut self) -> Result<(), ParserError> {
+    pub fn parse(&mut self) -> Result<Function, ParserError> {
         trace!("parser::Parser::parse()");
         self.advance();
 
@@ -253,7 +296,12 @@ impl<'a> Parser<'a> {
             self.declaration();
         }
 
-        Ok(())
+        self.end_parse();
+
+        let frame = self.frames.remove(0);
+        let function = frame.function;
+
+        Ok(function)
     }
 }
 
@@ -306,6 +354,14 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    fn current_frame(&self) -> &CompileFrame {
+        self.frames.last().unwrap()
+    }
+
+    fn current_frame_mut(&mut self) -> &mut CompileFrame {
+        self.frames.last_mut().unwrap()
+    }
+
     fn advance(&mut self) {
         trace!("parser::Parser::advance()");
         self.previous = self.current.clone();
@@ -364,6 +420,20 @@ impl<'a> Parser<'a> {
         &self.source[span.start..span.end]
     }
 
+    fn end_parse(&mut self) {
+        #[cfg(feature = "trace_execution")]
+        {
+            if self.had_error {
+                let frame = self.current_frame();
+                match &frame.function.name {
+                    Some(name) => disassemble_chunk(name.as_str(), &frame.function.chunk),
+                    None => disassemble_chunk("<script>", &frame.function.chunk),
+                }
+            }
+        }
+        self.emit_ops(OpCode::Nil, OpCode::Return);
+    }
+
     fn parse_precedence(&mut self, precedence: Precedence) {
         trace!(
             "parser::Parser::parse_precedence(precedence: {:?})",
@@ -404,6 +474,7 @@ impl<'a> Parser<'a> {
             ParseFn::Variable => self.variable(can_assign),
             ParseFn::And => self.and(),
             ParseFn::Or => self.or(),
+            ParseFn::Call => self.call(),
             ParseFn::None => {}
         }
     }
@@ -508,6 +579,32 @@ impl<'a> Parser<'a> {
         self.patch_jump(end_jump);
     }
 
+    fn call(&mut self) {
+        trace!("parser::Parser::call()");
+
+        let arg_count = self.argument_list();
+        self.emit_ops_usize(OpCode::Call, arg_count);
+    }
+
+    fn argument_list(&mut self) -> usize {
+        let mut arg_count = 0;
+
+        if !self.check_type(TokenType::RightParen) {
+            loop {
+                arg_count += 1;
+                self.expression();
+
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(TokenType::RightParen, "Expected ')' after arguments.");
+
+        arg_count
+    }
+
     fn named_variable(&mut self, name: Span, can_assign: bool) {
         trace!("parser::Parser::named_variable(name: {:?}", name);
         let mut arg = self.resolve_local(name.clone());
@@ -536,7 +633,7 @@ impl<'a> Parser<'a> {
         self.consume(TokenType::Identifier, error_message);
 
         self.declare_variable();
-        if self.scope_depth > 0 {
+        if self.current_frame().scope_depth > 0 {
             return 0;
         }
 
@@ -545,17 +642,19 @@ impl<'a> Parser<'a> {
 
     fn declare_variable(&mut self) {
         trace!("parser::Parser::declare_variable()");
-        if self.scope_depth == 0 {
+        if self.current_frame().scope_depth == 0 {
             return;
         }
 
         let name = self.previous.literal.clone();
 
-        let has_duplicate = self
+        let frame = self.current_frame();
+
+        let has_duplicate = frame
             .locals
             .iter()
             .rev()
-            .take_while(|l| l.depth != usize::MAX && l.depth < self.scope_depth)
+            .take_while(|l| l.depth != usize::MAX && l.depth < frame.scope_depth)
             .any(|l| self.identifier_equal(name.clone(), l.name.clone()));
 
         if has_duplicate {
@@ -567,19 +666,25 @@ impl<'a> Parser<'a> {
 
     fn add_local(&mut self, name: Span) {
         trace!("parser::Parser::add_local(name: {:?})", name);
-        self.locals.push(Local::new(name, usize::MAX));
+
+        let frame = self.current_frame_mut();
+        frame.locals.push(Local::new(name, usize::MAX));
     }
 
     fn identifier_constant(&mut self, name: Span) -> usize {
         trace!("parser::Parser::identifier_constant(name: {:?})", name);
-        self.chunk.add_constant(Value::String {
-            value: Rc::new(String::from(&self.source[name.start..name.end])),
+
+        let source = &self.source[name.start..name.end];
+        let frame = self.current_frame_mut();
+        frame.function.chunk.add_constant(Value::String {
+            value: Rc::new(String::from(source)),
         })
     }
 
     fn declaration(&mut self) {
         trace!("parser::Parser::declaration()");
         match self.current.token_type {
+            TokenType::Fun => self.fun_declaration(),
             TokenType::Var => self.var_declaration(),
             _ => self.statement(),
         }
@@ -587,6 +692,86 @@ impl<'a> Parser<'a> {
         if self.panic {
             self.synchronize();
         }
+    }
+
+    fn fun_declaration(&mut self) {
+        trace!("parser::Parser::fun_declaration()");
+        self.advance();
+
+        let global = self.parse_variable("Expected function name after fun.");
+        self.mark_initialized();
+        self.function(FunctionType::Function);
+        self.define_variable(global);
+    }
+
+    fn function(&mut self, function_type: FunctionType) {
+        trace!(
+            "parser::Parser::function(function_type: {:?})",
+            function_type
+        );
+
+        let frame = CompileFrame::new(
+            Function::new(
+                0,
+                Chunk::new(),
+                Some(self.span_to_str(self.previous.literal.clone()).to_string()),
+            ),
+            function_type,
+            vec![],
+            vec![],
+            self.current_frame().scope_depth,
+        );
+        self.frames.push(frame);
+
+        self.begin_scope();
+
+        self.consume(TokenType::LeftParen, "Expected '(' after function name.");
+        if !self.check_type(TokenType::RightParen) {
+            loop {
+                let frame = self.current_frame_mut();
+
+                frame.function.arity += 1;
+
+                let constant = self.parse_variable("Expected parameter name.");
+                self.define_variable(constant);
+
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(
+            TokenType::RightParen,
+            "Expected ')' after function parameters.",
+        );
+        self.consume(TokenType::LeftBrace, "Expected '{' before function body.");
+
+        while !self.check_type(TokenType::RightBrace) && !self.check_type(TokenType::Eof) {
+            self.declaration();
+        }
+
+        self.consume(TokenType::RightBrace, "Expected '}' after function body.");
+
+        #[cfg(feature = "trace_execution")]
+        {
+            if self.had_error {
+                let frame = self.current_frame();
+                match &frame.function.name {
+                    Some(name) => disassemble_chunk(name.as_str(), &frame.function.chunk),
+                    None => disassemble_chunk("<script>", &frame.function.chunk),
+                }
+            }
+        }
+
+        self.emit_op(OpCode::Return);
+
+        let frame = self
+            .frames
+            .pop()
+            .expect("function frame must be present when finishing compilation");
+        self.emit_constant(Value::Function {
+            value: frame.function,
+        });
     }
 
     fn var_declaration(&mut self) {
@@ -608,7 +793,7 @@ impl<'a> Parser<'a> {
 
     fn define_variable(&mut self, var: usize) {
         trace!("parser::Parser::define_variable(var: {var})");
-        if self.scope_depth > 0 {
+        if self.current_frame().scope_depth > 0 {
             self.mark_initialized();
             return;
         }
@@ -619,7 +804,13 @@ impl<'a> Parser<'a> {
 
     fn mark_initialized(&mut self) {
         trace!("parser::Parser::mark_initialized()");
-        self.locals.last_mut().unwrap().set_depth(self.scope_depth);
+        if self.current_frame().scope_depth == 0 {
+            return;
+        }
+        let frame = self.current_frame_mut();
+        let scope_depth = frame.scope_depth;
+
+        frame.locals.last_mut().unwrap().set_depth(scope_depth);
     }
 
     fn statement(&mut self) {
@@ -627,6 +818,7 @@ impl<'a> Parser<'a> {
         match self.current.token_type {
             TokenType::Print => self.print_statement(),
             TokenType::If => self.if_statement(),
+            TokenType::Return => self.return_statement(),
             TokenType::While => self.while_statement(),
             TokenType::For => self.for_statement(),
             TokenType::LeftBrace => self.block(),
@@ -665,26 +857,30 @@ impl<'a> Parser<'a> {
 
     fn begin_scope(&mut self) {
         trace!("parser::Parser::begin_scope()");
-        self.scope_depth += 1;
+        self.current_frame_mut().scope_depth += 1;
     }
 
     fn end_scope(&mut self) {
         trace!("parser::Parser::end_scope()");
-        self.scope_depth -= 1;
+        {
+            let frame = self.current_frame_mut();
+            frame.scope_depth -= 1;
+        }
 
         loop {
-            if self.locals.len() == 0 {
-                break;
-            }
-
-            let local = self.locals.last().unwrap();
-
-            if local.depth <= self.scope_depth {
+            let should_pop = {
+                let f = self.current_frame();
+                match f.locals.last() {
+                    None => false,
+                    Some(local) => local.depth > f.scope_depth,
+                }
+            };
+            if !should_pop {
                 break;
             }
 
             self.emit_op(OpCode::Pop);
-            _ = self.locals.pop();
+            self.current_frame_mut().locals.pop();
         }
     }
 
@@ -703,7 +899,8 @@ impl<'a> Parser<'a> {
     fn resolve_local(&mut self, name: Span) -> usize {
         trace!("parser::Parser::resolve_local(name: {:?})", name);
         let mut error = false;
-        let resolved = self
+        let frame = self.current_frame();
+        let resolved = frame
             .locals
             .iter()
             .rev()
@@ -750,11 +947,30 @@ impl<'a> Parser<'a> {
         self.patch_jump(else_jump);
     }
 
+    fn return_statement(&mut self) {
+        trace!("parser::Parser::return_statement()");
+        self.advance();
+
+        if self.current_frame().function_type == FunctionType::Script {
+            self.error_at_current("Can't return from top-level code.");
+            return;
+        }
+
+        if self.match_token(TokenType::Semi) {
+            self.emit_ops(OpCode::Nil, OpCode::Return);
+        } else {
+            self.expression();
+            self.consume(TokenType::Semi, "Expected ';' after return value.");
+            self.emit_op(OpCode::Return);
+        }
+    }
+
     fn while_statement(&mut self) {
         trace!("parser::Parser::while_statement()");
         self.advance();
 
-        let loop_start = self.chunk.len();
+        let frame = self.current_frame();
+        let loop_start = frame.function.chunk.len();
 
         self.consume(TokenType::LeftParen, "Expected '(' after 'while'.");
         self.expression();
@@ -785,7 +1001,8 @@ impl<'a> Parser<'a> {
             self.expression_statement();
         }
 
-        let loop_start = self.chunk.len();
+        let frame = self.current_frame();
+        let loop_start = frame.function.chunk.len();
         self.consume(
             TokenType::Semi,
             "Expected ';' after loop variable condition.",
@@ -805,7 +1022,8 @@ impl<'a> Parser<'a> {
 
         self.emit_op(OpCode::Loop);
 
-        let offset = self.chunk.len() - loop_start;
+        let frame = self.current_frame();
+        let offset = frame.function.chunk.len() - loop_start;
 
         self.emit_op_usize(offset);
     }
@@ -814,13 +1032,18 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     fn emit_op(&mut self, op: OpCode) {
         trace!("parser::Parser::emit_op(op: {:?})", op);
-        self.chunk
-            .write(op as usize, self.previous.line, self.previous.col);
+        let line = self.previous.line;
+        let col = self.previous.col;
+        let function = &mut self.current_frame_mut().function;
+        function.chunk.write(op as usize, line, col);
     }
 
     fn emit_op_usize(&mut self, op: usize) {
         trace!("parser::Parser::emit_op(op: {op})");
-        self.chunk.write(op, self.previous.line, self.previous.col);
+        let line = self.previous.line;
+        let col = self.previous.col;
+        let function = &mut self.current_frame_mut().function;
+        function.chunk.write(op, line, col);
     }
 
     fn emit_ops(&mut self, op1: OpCode, op2: OpCode) {
@@ -837,22 +1060,27 @@ impl<'a> Parser<'a> {
 
     fn emit_constant(&mut self, value: Value) {
         trace!("parser::Parser::emit_constant(value: {value})");
-        let pos = self.chunk.add_constant(value);
-        self.emit_op(OpCode::Constant);
-        self.emit_op_usize(pos);
+        let line = self.previous.line;
+        let col = self.previous.col;
+        let function = &mut self.current_frame_mut().function;
+        let pos = function.chunk.add_constant(value);
+        function.chunk.write(OpCode::Constant as usize, line, col);
+        function.chunk.write(pos, line, col);
     }
 
     fn emit_jump(&mut self, op: OpCode) -> usize {
         trace!("parser::Parser::emit_jump({:?})", op);
         self.emit_op(op);
         self.emit_op_usize(usize::MAX);
-        self.chunk.len() - 1
+        let function = &mut self.current_frame_mut().function;
+        function.chunk.len() - 1
     }
 
     fn patch_jump(&mut self, offset: usize) {
         trace!("parser::Parser::patch_jump(offset: {offset})");
         // Distance from the operand to the next instruction after the jump target
-        let jump = self.chunk.len() - offset - 1;
-        self.chunk.instructions[offset] = jump;
+        let function = &mut self.current_frame_mut().function;
+        let jump = function.chunk.len() - offset - 1;
+        function.chunk.instructions[offset] = jump;
     }
 }
