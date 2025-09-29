@@ -354,10 +354,12 @@ impl<'a> Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[inline]
     fn current_frame(&self) -> &CompileFrame {
         self.frames.last().unwrap()
     }
 
+    #[inline]
     fn current_frame_mut(&mut self) -> &mut CompileFrame {
         self.frames.last_mut().unwrap()
     }

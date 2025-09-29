@@ -8,7 +8,7 @@ use crate::args::Args;
 use crate::compile::compile;
 use crate::function::{self, Function};
 use crate::parser::CompileFrame;
-use crate::value::Value;
+use crate::value::{NativeFn, Value};
 
 static MAX_FRAMES: usize = 255;
 
@@ -197,6 +197,8 @@ impl VM {
     pub fn interpret(&mut self, source: String) -> InterpretResult {
         trace!("vm::VM::interpret()");
 
+        self.populate_native_fn();
+
         self.source = source;
 
         let Ok(function) = compile(self.source.as_str()) else {
@@ -210,6 +212,12 @@ impl VM {
 }
 
 impl VM {
+    fn populate_native_fn(&mut self) {
+        self.define_native("hello", |_, _| Value::String {
+            value: Rc::new(String::from("Hello, world!")),
+        });
+    }
+
     fn run(&mut self) -> InterpretResult {
         trace!("vm::VM::run()");
 
@@ -309,58 +317,69 @@ impl VM {
         }
     }
 
+    #[inline]
     fn current_frame(&self) -> &CallFrame {
         self.frames.last().unwrap()
     }
 
+    #[inline]
     fn current_frame_mut(&mut self) -> &mut CallFrame {
         self.frames.last_mut().unwrap()
     }
 
+    #[inline]
     fn current_cursor(&self) -> usize {
         self.frames.last().unwrap().cursor
     }
 
+    #[inline]
     fn current_slots(&self) -> &Vec<Value> {
         &self.frames.last().unwrap().slots
     }
 
+    #[inline]
     fn current_slots_mut(&mut self) -> &mut Vec<Value> {
         &mut self.frames.last_mut().unwrap().slots
     }
 
+    #[inline]
     fn current_function(&self) -> &Function {
         let frame = self.frames.last().unwrap();
         &frame.function
     }
 
+    #[inline]
     fn current_function_mut(&mut self) -> &mut Function {
         let frame = self.frames.last_mut().unwrap();
         &mut frame.function
     }
 
+    #[inline]
     fn current_chunk(&self) -> &Chunk {
         let function = &(self.frames.last().unwrap().function);
         &function.chunk
     }
 
+    #[inline]
     fn current_chunk_mut(&mut self) -> &mut Chunk {
         let function = &mut (self.frames.last_mut().unwrap().function);
         &mut function.chunk
     }
 
+    #[inline]
     fn current_instructions(&self) -> &Vec<usize> {
         let chunk = &(self.frames.last().unwrap().function.chunk);
         &chunk.instructions
     }
 
+    #[inline]
     fn current_instructions_mut(&mut self) -> &mut Vec<usize> {
         let chunk = &mut (self.frames.last_mut().unwrap().function.chunk);
         &mut chunk.instructions
     }
 
+    #[inline]
     fn current_instruction(&self) -> usize {
-        trace!("vm::VM::currrent_instruction()");
         self.current_instructions()[self.current_cursor()]
     }
 
@@ -673,7 +692,7 @@ impl VM {
                     .len()
                     .saturating_sub(self.stack.len() - arg_count - 1);
                 let slots = self.current_slots()[start..].to_vec();
-                let result = self.invoke_native(value, arg_count, slots);
+                let result = (value.function)(arg_count, slots);
 
                 for _ in 0..=arg_count {
                     self.stack.pop();
@@ -681,7 +700,7 @@ impl VM {
 
                 self.push_value(result);
 
-                false
+                true
             }
             _ => {
                 _ = self.runtime_error("Can only call functions and classes.");
@@ -738,13 +757,15 @@ impl VM {
         Ok(false)
     }
 
-    fn define_native(&mut self, name: &str, function: Function) {
+    fn define_native(&mut self, name: &str, function: fn(usize, Vec<Value>) -> Value) {
+        let function = NativeFn::new(name, function);
+
         self.push_value(Value::String {
             value: Rc::new(String::from(name)),
         });
         self.push_value(Value::NativeFn { value: function });
-        let name = self.peek_value_at(0).unwrap();
-        let function = self.peek_value_at(1).unwrap();
+        let function = self.peek_value_at(0).unwrap();
+        let name = self.peek_value_at(1).unwrap();
 
         match name {
             Value::String { value: name } => {
@@ -755,10 +776,6 @@ impl VM {
 
         self.pop_value();
         self.pop_value();
-    }
-
-    fn invoke_native(&self, function: Function, arg_count: usize, slots: Vec<Value>) -> Value {
-        Value::Nil
     }
 }
 

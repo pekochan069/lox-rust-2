@@ -3,13 +3,28 @@ use std::{fmt, rc::Rc};
 use crate::function::Function;
 
 #[derive(Debug, Clone)]
+pub struct NativeFn {
+    pub name: String,
+    pub function: fn(usize, Vec<Value>) -> Value,
+}
+
+impl NativeFn {
+    pub fn new(name: &str, function: fn(usize, Vec<Value>) -> Value) -> Self {
+        Self {
+            name: String::from(name),
+            function,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
     Bool { value: bool },
     Number { value: f64 },
     Nil,
     String { value: Rc<String> },
     Function { value: Function },
-    NativeFn { value: Function },
+    NativeFn { value: NativeFn },
 }
 
 impl Value {
@@ -51,8 +66,7 @@ impl fmt::Display for Value {
                 }
             }
             Self::NativeFn { value } => {
-                let name = value.name.clone().unwrap();
-                write!(f, "<native fn {name}>")
+                write!(f, "<native fn {}>", value.name)
             }
         }
     }
