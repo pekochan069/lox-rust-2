@@ -6,8 +6,7 @@ use lox_rust_2::{binary_bool_op, binary_number_op};
 
 use crate::args::Args;
 use crate::compile::compile;
-use crate::function::{self, Function};
-use crate::parser::CompileFrame;
+use crate::function::Function;
 use crate::value::{NativeFn, Value};
 
 static MAX_FRAMES: usize = 255;
@@ -144,20 +143,16 @@ impl Chunk {
 pub struct CallFrame {
     function: Function,
     cursor: usize,
-    slots: Vec<Value>,
+    slot_base: usize,
 }
 
 impl CallFrame {
-    pub fn new(function: Function, cursor: usize, slots: Vec<Value>) -> Self {
+    pub fn new(function: Function, cursor: usize, slot_base: usize) -> Self {
         Self {
             function,
             cursor,
-            slots,
+            slot_base,
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.slots.clear();
     }
 }
 
@@ -205,7 +200,7 @@ impl VM {
             return InterpretResult::CompileError;
         };
 
-        self.frames.push(CallFrame::new(function, 0, vec![]));
+        self.frames.push(CallFrame::new(function, 0, 0));
 
         self.run()
     }
@@ -333,13 +328,11 @@ impl VM {
     }
 
     #[inline]
-    fn current_slots(&self) -> &Vec<Value> {
-        &self.frames.last().unwrap().slots
-    }
-
-    #[inline]
-    fn current_slots_mut(&mut self) -> &mut Vec<Value> {
-        &mut self.frames.last_mut().unwrap().slots
+    fn current_slot_base(&self) -> usize {
+        self.frames
+            .last()
+            .expect("call frame must exist when accessing slot base")
+            .slot_base
     }
 
     #[inline]
@@ -613,7 +606,14 @@ impl VM {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
 
-        self.push_value(self.current_slots()[slot].clone());
+        let base = self.current_slot_base();
+        let index = base + slot;
+
+        let Some(value) = self.stack.get(index) else {
+            return Err(self.runtime_error("Invalid access to stack."));
+        };
+
+        self.push_value(value.clone());
 
         Ok(())
     }
@@ -624,9 +624,19 @@ impl VM {
             return Err(self.runtime_error("Cannot get slot for local variable."));
         };
 
-        let value = self.peek_value_at(0).unwrap().clone();
+        let value = self
+            .peek_value_at(0)
+            .ok_or_else(|| self.runtime_error("Invalid access to stack."))?
+            .clone();
 
-        self.current_slots_mut()[slot] = value;
+        let base = self.current_slot_base();
+        let index = base + slot;
+
+        let Some(slot_ref) = self.stack.get_mut(index) else {
+            return Err(self.runtime_error("Invalid access to stack."));
+        };
+
+        *slot_ref = value;
 
         Ok(())
     }
@@ -687,12 +697,14 @@ impl VM {
         match value {
             Value::Function { value } => self.call(value, arg_count),
             Value::NativeFn { value } => {
-                let start = self
-                    .current_slots()
-                    .len()
-                    .saturating_sub(self.stack.len() - arg_count - 1);
-                let slots = self.current_slots()[start..].to_vec();
-                let result = (value.function)(arg_count, slots);
+                if self.stack.len() < arg_count + 1 {
+                    _ = self.runtime_error("Invalid access to stack.");
+                    return false;
+                }
+
+                let args_start = self.stack.len() - arg_count;
+                let args = self.stack[args_start..].to_vec();
+                let result = (value.function)(arg_count, args);
 
                 for _ in 0..=arg_count {
                     self.stack.pop();
@@ -725,11 +737,13 @@ impl VM {
             return false;
         }
 
-        let start = self
-            .current_slots()
-            .len()
-            .saturating_sub(self.stack.len() - arg_count - 1);
-        let frame = CallFrame::new(function, 0, self.current_slots()[start..].to_vec());
+        if self.stack.len() < arg_count + 1 {
+            _ = self.runtime_error("Invalid access to stack.");
+            return false;
+        }
+
+        let slot_base = self.stack.len() - arg_count - 1;
+        let frame = CallFrame::new(function, 0, slot_base);
         self.frames.push(frame);
 
         true
@@ -741,17 +755,17 @@ impl VM {
             return Err(self.runtime_error("Invalid access to stack."));
         };
 
-        self.frames.pop();
+        let frame = self
+            .frames
+            .pop()
+            .expect("return_op cannot run without an active call frame");
 
         if self.frames.len() == 0 {
-            self.pop_value();
+            self.stack.clear();
             return Ok(true);
         }
 
-        let slots = self.current_slots().clone();
-
-        self.stack.extend(slots);
-
+        self.stack.truncate(frame.slot_base);
         self.push_value(result);
 
         Ok(false)

@@ -269,13 +269,15 @@ impl<'a> Parser<'a> {
     pub fn new(source: &'a str, tokens: Peekable<LexerIterator<'a>>) -> Self {
         trace!("parser::Parser::new(source, tokens)");
 
-        let root_frame = CompileFrame::new(
+        let mut root_frame = CompileFrame::new(
             Function::new(0, Chunk::new(), None),
             FunctionType::Script,
             vec![],
             vec![],
             0,
         );
+
+        root_frame.locals.push(Local::new(Span::new(0, 0), 0));
 
         Self {
             source,
@@ -725,6 +727,10 @@ impl<'a> Parser<'a> {
         );
         self.frames.push(frame);
 
+        self.current_frame_mut()
+            .locals
+            .push(Local::new(Span::new(0, 0), 0));
+
         self.begin_scope();
 
         self.consume(TokenType::LeftParen, "Expected '(' after function name.");
@@ -902,18 +908,19 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::resolve_local(name: {:?})", name);
         let mut error = false;
         let frame = self.current_frame();
-        let resolved = frame
-            .locals
+        let locals = &frame.locals;
+        let locals_len = locals.len();
+        let resolved = locals
             .iter()
             .rev()
             .enumerate()
             .find_map(|(i, local)| {
                 if self.identifier_equal(name.clone(), local.name.clone()) {
-                    if local.depth == 0 {
+                    if local.depth == usize::MAX {
                         error = true;
                         None
                     } else {
-                        Some(i)
+                        Some(locals_len - 1 - i)
                     }
                 } else {
                     None
