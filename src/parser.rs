@@ -208,13 +208,18 @@ fn get_precedence_rule(token_type: TokenType) -> Precedence {
 
 #[derive(Debug)]
 pub struct Local {
-    name: Span,
-    depth: usize,
+    pub name: Span,
+    pub depth: usize,
+    pub is_captured: bool,
 }
 
 impl Local {
-    pub fn new(name: Span, depth: usize) -> Self {
-        Self { name, depth }
+    pub fn new(name: Span, depth: usize, is_captured: bool) -> Self {
+        Self {
+            name,
+            depth,
+            is_captured,
+        }
     }
 
     pub fn set_depth(&mut self, depth: usize) {
@@ -226,8 +231,8 @@ impl Local {
 pub struct CompileFrame {
     pub function: Function,
     pub function_type: FunctionType,
-    pub slots: Vec<Value>,
     pub locals: Vec<Local>,
+    pub upvalues: Vec<UpValue>,
     pub scope_depth: usize,
 }
 
@@ -235,23 +240,35 @@ impl CompileFrame {
     pub fn new(
         function: Function,
         function_type: FunctionType,
-        slots: Vec<Value>,
         locals: Vec<Local>,
+        upvalues: Vec<UpValue>,
         scope_depth: usize,
     ) -> Self {
         Self {
             function,
             function_type,
-            slots,
             locals,
+            upvalues,
             scope_depth,
         }
     }
 
     pub fn clear(&mut self) {
-        self.slots.clear();
         self.locals.clear();
+        self.upvalues.clear();
         self.function.chunk.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UpValue {
+    pub is_local: bool,
+    pub index: usize,
+}
+
+impl UpValue {
+    pub fn new(is_local: bool, index: usize) -> Self {
+        Self { is_local, index }
     }
 }
 
@@ -263,6 +280,7 @@ pub struct Parser<'a> {
     had_error: bool,
     panic: bool,
     frames: Vec<CompileFrame>,
+    frame_index: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -270,14 +288,16 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::new(source, tokens)");
 
         let mut root_frame = CompileFrame::new(
-            Function::new(0, Chunk::new(), None),
+            Function::new(0, Chunk::new(), None, 0),
             FunctionType::Script,
             vec![],
             vec![],
             0,
         );
 
-        root_frame.locals.push(Local::new(Span::new(0, 0), 0));
+        root_frame
+            .locals
+            .push(Local::new(Span::new(0, 0), 0, false));
 
         Self {
             source,
@@ -287,6 +307,7 @@ impl<'a> Parser<'a> {
             had_error: false,
             panic: false,
             frames: vec![root_frame],
+            frame_index: 0,
         }
     }
 
@@ -358,12 +379,13 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     #[inline]
     fn current_frame(&self) -> &CompileFrame {
-        self.frames.last().unwrap()
+        &self.frames[self.frame_index]
     }
 
     #[inline]
     fn current_frame_mut(&mut self) -> &mut CompileFrame {
-        self.frames.last_mut().unwrap()
+        let index = self.frame_index;
+        &mut self.frames[index]
     }
 
     fn advance(&mut self) {
@@ -619,9 +641,16 @@ impl<'a> Parser<'a> {
             get_op = OpCode::GetLocal;
             set_op = OpCode::SetLocal;
         } else {
-            arg = self.identifier_constant(name);
-            get_op = OpCode::GetGlobal;
-            set_op = OpCode::SetGlobal;
+            let upvalue = self.resolve_upvalue(name.clone());
+            if upvalue != usize::MAX {
+                arg = upvalue;
+                get_op = OpCode::GetUpvalue;
+                set_op = OpCode::SetUpvalue;
+            } else {
+                arg = self.identifier_constant(name);
+                get_op = OpCode::GetGlobal;
+                set_op = OpCode::SetGlobal;
+            }
         }
 
         if can_assign && self.match_token(TokenType::Equal) {
@@ -630,6 +659,50 @@ impl<'a> Parser<'a> {
         } else {
             self.emit_ops_usize(get_op, arg);
         }
+    }
+
+    fn resolve_upvalue(&mut self, name: Span) -> usize {
+        trace!("parser::Parser::resolve_upvalue(name: {:?})", name);
+
+        if self.frame_index == 0 {
+            return usize::MAX;
+        }
+
+        let current_index = self.frame_index;
+
+        self.frame_index -= 1;
+        let local = self.resolve_local(name.clone());
+        if local != usize::MAX {
+            self.current_frame_mut().locals[local].is_captured = true;
+            self.frame_index = current_index;
+            return self.add_upvalue(local, true);
+        }
+
+        let upvalue = self.resolve_upvalue(name.clone());
+        self.frame_index = current_index;
+        if upvalue != usize::MAX {
+            return self.add_upvalue(upvalue, false);
+        }
+
+        usize::MAX
+    }
+
+    fn add_upvalue(&mut self, index: usize, is_local: bool) -> usize {
+        trace!("parser::Parser::add_upvalue(index: {index}, is_local: {is_local})");
+
+        let frame = self.current_frame_mut();
+        if let Some(pos) = frame
+            .upvalues
+            .iter()
+            .position(|upvalue| upvalue.index == index && upvalue.is_local == is_local)
+        {
+            return pos;
+        }
+
+        frame.upvalues.push(UpValue::new(is_local, index));
+        frame.function.upvalue_count = frame.upvalues.len();
+
+        frame.upvalues.len() - 1
     }
 
     fn parse_variable(&mut self, error_message: &str) -> usize {
@@ -672,7 +745,7 @@ impl<'a> Parser<'a> {
         trace!("parser::Parser::add_local(name: {:?})", name);
 
         let frame = self.current_frame_mut();
-        frame.locals.push(Local::new(name, usize::MAX));
+        frame.locals.push(Local::new(name, usize::MAX, false));
     }
 
     fn identifier_constant(&mut self, name: Span) -> usize {
@@ -719,6 +792,7 @@ impl<'a> Parser<'a> {
                 0,
                 Chunk::new(),
                 Some(self.span_to_str(self.previous.literal.clone()).to_string()),
+                0,
             ),
             function_type,
             vec![],
@@ -726,10 +800,11 @@ impl<'a> Parser<'a> {
             self.current_frame().scope_depth,
         );
         self.frames.push(frame);
+        self.frame_index += 1;
 
         self.current_frame_mut()
             .locals
-            .push(Local::new(Span::new(0, 0), 0));
+            .push(Local::new(Span::new(0, 0), 0, false));
 
         self.begin_scope();
 
@@ -777,9 +852,31 @@ impl<'a> Parser<'a> {
             .frames
             .pop()
             .expect("function frame must be present when finishing compilation");
-        self.emit_constant(Value::Function {
-            value: frame.function,
+        self.frame_index -= 1;
+
+        let CompileFrame {
+            function: inner_function,
+            upvalues,
+            ..
+        } = frame;
+
+        let line = self.previous.line;
+        let col = self.previous.col;
+        let function = &mut self.current_frame_mut().function;
+        let pos = function.chunk.add_constant(Value::Function {
+            value: inner_function,
         });
+        function.chunk.write(OpCode::Closure as usize, line, col);
+        function.chunk.write(pos, line, col);
+
+        for upvalue in upvalues {
+            if upvalue.is_local {
+                self.emit_op(OpCode::True);
+            } else {
+                self.emit_op(OpCode::False);
+            }
+            self.emit_op_usize(upvalue.index);
+        }
     }
 
     fn var_declaration(&mut self) {
@@ -887,7 +984,17 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            self.emit_op(OpCode::Pop);
+            if self
+                .current_frame()
+                .locals
+                .last()
+                .expect("Expected locals.")
+                .is_captured
+            {
+                self.emit_op(OpCode::CloseUpValue);
+            } else {
+                self.emit_op(OpCode::Pop);
+            }
             self.current_frame_mut().locals.pop();
         }
     }

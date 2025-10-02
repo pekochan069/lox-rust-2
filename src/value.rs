@@ -1,6 +1,6 @@
 use std::{fmt, rc::Rc};
 
-use crate::function::Function;
+use crate::function::{Closure, Function, Upvalue};
 
 #[derive(Debug, Clone)]
 pub struct NativeFn {
@@ -23,6 +23,8 @@ pub enum Value {
     Number { value: f64 },
     Nil,
     String { value: Rc<String> },
+    Closure { value: Closure },
+    Upvalue { value: Upvalue },
     Function { value: Function },
     NativeFn { value: NativeFn },
 }
@@ -34,6 +36,8 @@ impl Value {
             Self::Number { value: _ } => false,
             Self::Nil => true,
             Self::String { value: _ } => false,
+            Self::Closure { value: _ } => false,
+            Self::Upvalue { value: _ } => false,
             Self::Function { value: _ } => false,
             Self::NativeFn { value: _ } => false,
         }
@@ -57,6 +61,15 @@ impl fmt::Display for Value {
             Self::Number { value } => write!(f, "{value}"),
             Self::Nil => write!(f, "nil"),
             Self::String { value } => write!(f, "{value}"),
+            Self::Closure { value } => {
+                let name = &value.function.name;
+
+                match name {
+                    Some(name) => write!(f, "<fn {name}>"),
+                    None => write!(f, "<script>"),
+                }
+            }
+            Self::Upvalue { value: _ } => write!(f, "upvalue"),
             Self::Function { value } => {
                 let name = &value.name;
 

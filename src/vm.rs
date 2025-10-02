@@ -1,12 +1,13 @@
 use log::trace;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::rc::Rc;
 
 use lox_rust_2::{binary_bool_op, binary_number_op};
 
 use crate::args::Args;
 use crate::compile::compile;
-use crate::function::Function;
+use crate::function::{Closure, Function, Upvalue, UpvalueLoc};
 use crate::value::{NativeFn, Value};
 
 static MAX_FRAMES: usize = 255;
@@ -47,6 +48,10 @@ pub enum OpCode {
     Jump,
     Loop,
     Call,
+    Closure,
+    GetUpvalue,
+    SetUpvalue,
+    CloseUpValue,
     Unknown,
 }
 
@@ -79,6 +84,10 @@ impl OpCode {
             22 => Self::Jump,
             23 => Self::Loop,
             24 => Self::Call,
+            25 => Self::Closure,
+            26 => Self::GetUpvalue,
+            27 => Self::SetUpvalue,
+            29 => Self::CloseUpValue,
             _ => Self::Unknown,
         }
     }
@@ -141,15 +150,15 @@ impl Chunk {
 
 #[derive(Debug)]
 pub struct CallFrame {
-    function: Function,
+    closure: Closure,
     cursor: usize,
     slot_base: usize,
 }
 
 impl CallFrame {
-    pub fn new(function: Function, cursor: usize, slot_base: usize) -> Self {
+    pub fn new(closure: Closure, cursor: usize, slot_base: usize) -> Self {
         Self {
-            function,
+            closure,
             cursor,
             slot_base,
         }
@@ -168,6 +177,8 @@ pub struct VM {
     source: String,
     globals: HashMap<Rc<String>, Value>,
     frames: Vec<CallFrame>,
+    upvalues: Vec<Upvalue>,
+    open_upvalues: Vec<(usize, usize)>, // (stack_index, up_index)
 }
 
 impl VM {
@@ -179,6 +190,8 @@ impl VM {
             source: String::new(),
             globals: HashMap::new(),
             frames: vec![],
+            upvalues: vec![],
+            open_upvalues: vec![],
         }
     }
 
@@ -200,7 +213,8 @@ impl VM {
             return InterpretResult::CompileError;
         };
 
-        self.frames.push(CallFrame::new(function, 0, 0));
+        self.frames
+            .push(CallFrame::new(Closure::new(function, vec![]), 0, 0));
 
         self.run()
     }
@@ -277,6 +291,10 @@ impl VM {
                 OpCode::Jump => self.jump(),
                 OpCode::Loop => self.loop_op(),
                 OpCode::Call => try_or_return!(self.call_op()),
+                OpCode::Closure => try_or_return!(self.closure()),
+                OpCode::SetUpvalue => try_or_return!(self.set_upvalue()),
+                OpCode::GetUpvalue => try_or_return!(self.get_upvalue()),
+                OpCode::CloseUpValue => self.close_upvalue(),
                 OpCode::Unknown => return InterpretResult::CompileError,
             }
 
@@ -291,10 +309,10 @@ impl VM {
     fn next(&mut self) -> Option<usize> {
         trace!("vm::VM::next()");
         let frame = self.current_frame_mut();
-        if frame.function.chunk.instructions.len() == 0 {
+        if frame.closure.function.chunk.instructions.len() == 0 {
             None
         } else {
-            let instruction = frame.function.chunk.instructions[frame.cursor];
+            let instruction = frame.closure.function.chunk.instructions[frame.cursor];
             frame.cursor += 1;
             Some(instruction)
         }
@@ -303,10 +321,11 @@ impl VM {
     fn next_opcode(&mut self) -> Option<OpCode> {
         trace!("VM::next_opcode()");
         let frame = self.current_frame_mut();
-        if frame.function.chunk.instructions.len() == 0 {
+        if frame.closure.function.chunk.instructions.len() == 0 {
             None
         } else {
-            let instruction = OpCode::from_usize(frame.function.chunk.instructions[frame.cursor]);
+            let instruction =
+                OpCode::from_usize(frame.closure.function.chunk.instructions[frame.cursor]);
             frame.cursor += 1;
             Some(instruction)
         }
@@ -336,38 +355,48 @@ impl VM {
     }
 
     #[inline]
+    fn current_closure(&self) -> &Closure {
+        &self.frames.last().unwrap().closure
+    }
+
+    #[inline]
+    fn current_closure_mut(&mut self) -> &mut Closure {
+        &mut self.frames.last_mut().unwrap().closure
+    }
+
+    #[inline]
     fn current_function(&self) -> &Function {
         let frame = self.frames.last().unwrap();
-        &frame.function
+        &frame.closure.function
     }
 
     #[inline]
     fn current_function_mut(&mut self) -> &mut Function {
         let frame = self.frames.last_mut().unwrap();
-        &mut frame.function
+        &mut frame.closure.function
     }
 
     #[inline]
     fn current_chunk(&self) -> &Chunk {
-        let function = &(self.frames.last().unwrap().function);
+        let function = &(self.frames.last().unwrap().closure.function);
         &function.chunk
     }
 
     #[inline]
     fn current_chunk_mut(&mut self) -> &mut Chunk {
-        let function = &mut (self.frames.last_mut().unwrap().function);
+        let function = &mut (self.frames.last_mut().unwrap().closure.function);
         &mut function.chunk
     }
 
     #[inline]
     fn current_instructions(&self) -> &Vec<usize> {
-        let chunk = &(self.frames.last().unwrap().function.chunk);
+        let chunk = &(self.frames.last().unwrap().closure.function.chunk);
         &chunk.instructions
     }
 
     #[inline]
     fn current_instructions_mut(&mut self) -> &mut Vec<usize> {
-        let chunk = &mut (self.frames.last_mut().unwrap().function.chunk);
+        let chunk = &mut (self.frames.last_mut().unwrap().closure.function.chunk);
         &mut chunk.instructions
     }
 
@@ -695,7 +724,7 @@ impl VM {
     fn call_value(&mut self, value: Value, arg_count: usize) -> bool {
         trace!("vm::VM::call_value(value: {value}, arg_count: {arg_count})");
         match value {
-            Value::Function { value } => self.call(value, arg_count),
+            Value::Closure { value } => self.call(value, arg_count),
             Value::NativeFn { value } => {
                 if self.stack.len() < arg_count + 1 {
                     _ = self.runtime_error("Invalid access to stack.");
@@ -721,12 +750,12 @@ impl VM {
         }
     }
 
-    fn call(&mut self, function: Function, arg_count: usize) -> bool {
+    fn call(&mut self, closure: Closure, arg_count: usize) -> bool {
         trace!("vm::VM::call(function, arg_count: {arg_count})");
-        if function.arity != arg_count {
+        if closure.function.arity != arg_count {
             let message = format!(
                 "Expected {} arguments but got {}.",
-                function.arity, arg_count
+                closure.function.arity, arg_count
             );
             _ = self.runtime_error(message.as_str());
             return false;
@@ -743,7 +772,7 @@ impl VM {
         }
 
         let slot_base = self.stack.len() - arg_count - 1;
-        let frame = CallFrame::new(function, 0, slot_base);
+        let frame = CallFrame::new(closure, 0, slot_base);
         self.frames.push(frame);
 
         true
@@ -760,8 +789,11 @@ impl VM {
             .pop()
             .expect("return_op cannot run without an active call frame");
 
+        self.close_upvalues_from(frame.slot_base);
+
         if self.frames.len() == 0 {
             self.stack.clear();
+            self.push_value(result);
             return Ok(true);
         }
 
@@ -772,6 +804,7 @@ impl VM {
     }
 
     fn define_native(&mut self, name: &str, function: fn(usize, Vec<Value>) -> Value) {
+        trace!("vm::VM::define_native(name: {name}, function)");
         let function = NativeFn::new(name, function);
 
         self.push_value(Value::String {
@@ -791,6 +824,154 @@ impl VM {
         self.pop_value();
         self.pop_value();
     }
+
+    fn closure(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::closure()");
+        let Ok(constant) = self.read_constant() else {
+            return Err(InterpretResult::RuntimeError);
+        };
+
+        match constant {
+            Value::Function { value: function } => {
+                let mut closure = Closure::new(function, vec![]);
+
+                for _ in 0..closure.function.upvalue_count {
+                    let Some(is_local) = self.next_opcode() else {
+                        return Err(self.runtime_error(""));
+                    };
+                    let Some(index) = self.next() else {
+                        return Err(self.runtime_error(""));
+                    };
+
+                    match is_local {
+                        OpCode::True => {
+                            let id = self.capture_upvalue(index)?;
+
+                            closure.upvalues.push(id);
+                        }
+                        OpCode::False => {
+                            let id =
+                                *self.current_closure().upvalues.get(index).ok_or_else(|| {
+                                    self.runtime_error("Bad outer upvalue index.")
+                                })?;
+
+                            closure.upvalues.push(id);
+                        }
+                        _ => return Err(self.runtime_error("")),
+                    }
+                }
+
+                let value = Value::Closure { value: closure };
+
+                self.push_value(value);
+            }
+            _ => return Err(self.runtime_error("Invalid function object.")),
+        }
+
+        Ok(())
+    }
+
+    fn capture_upvalue(&mut self, index: usize) -> Result<usize, InterpretResult> {
+        trace!("vm::VM::capture_upvalue(index: {index})");
+        let index = self.current_slot_base() + index;
+
+        match self.open_upvalues.binary_search_by_key(&index, |(i, _)| *i) {
+            Ok(pos) => Ok(self.open_upvalues[pos].1),
+            Err(pos) => {
+                let id = self.upvalues.len();
+                self.upvalues.push(Upvalue::new_open(index));
+                self.open_upvalues.insert(pos, (index, id));
+                Ok(id)
+            }
+        }
+    }
+
+    fn set_upvalue(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::set_upvalue()");
+
+        let Some(slot) = self.next() else {
+            return Err(InterpretResult::RuntimeError);
+        };
+
+        let value = self
+            .peek_value_at(0)
+            .ok_or_else(|| self.runtime_error("Stack underflow."))?
+            .clone();
+
+        let up_id = *self
+            .current_closure()
+            .upvalues
+            .get(slot)
+            .ok_or_else(|| self.runtime_error("Bad upvalue slot."))?;
+
+        match self.upvalues[up_id].loc {
+            UpvalueLoc::Open(i) => {
+                let s = self.stack.get_mut(i).unwrap();
+                *s = value;
+            }
+            UpvalueLoc::Closed => {
+                self.upvalues[up_id].value = Rc::new(value);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_upvalue(&mut self) -> Result<(), InterpretResult> {
+        trace!("vm::VM::get_upvalue()");
+
+        let Some(slot) = self.next() else {
+            return Err(self.runtime_error("Bad upvalue."));
+        };
+
+        let up_id = *self
+            .current_closure()
+            .upvalues
+            .get(slot)
+            .ok_or_else(|| self.runtime_error("Bad upvalue slot."))?;
+
+        let value = match self.upvalues[up_id].loc {
+            UpvalueLoc::Open(i) => self
+                .stack
+                .get(i)
+                .ok_or_else(|| self.runtime_error("Stack out of boundary."))?
+                .clone(),
+            UpvalueLoc::Closed => self.upvalues[up_id].value.deref().clone(),
+        };
+
+        self.push_value(value);
+
+        Ok(())
+    }
+
+    fn close_upvalue(&mut self) {
+        if let Some(top) = self.stack.len().checked_sub(1) {
+            let start = self.open_upvalues.partition_point(|(i, _)| *i < top);
+            let end = self.open_upvalues.partition_point(|(i, _)| *i <= top);
+
+            for (_, id) in self.open_upvalues.drain(start..end) {
+                if let UpvalueLoc::Open(idx) = self.upvalues[id].loc {
+                    let value = self.stack[idx].clone();
+                    self.upvalues[id].value = Rc::new(value);
+                    self.upvalues[id].loc = UpvalueLoc::Closed;
+                }
+            }
+        }
+    }
+
+    fn close_upvalues_from(&mut self, from: usize) {
+        trace!("vm::VM::close_upvalues(from: {from})");
+
+        let start = self.open_upvalues.partition_point(|(i, _)| *i < from);
+
+        for (_, id) in self.open_upvalues.drain(start..) {
+            if let UpvalueLoc::Open(i) = self.upvalues[id].loc {
+                let value = self.stack[i].clone();
+                self.upvalues[id].value = Rc::new(value);
+                self.upvalues[id].loc = UpvalueLoc::Closed;
+            }
+        }
+    }
 }
 
 impl VM {
@@ -799,7 +980,7 @@ impl VM {
         eprintln!("[{}:{}] {message}", loc.line, loc.col);
 
         for frame in self.frames.iter() {
-            let function = &frame.function;
+            let function = &frame.closure.function;
             let instruction = frame.cursor - 1;
             let loc = function.chunk.loc[instruction].clone();
             eprint!("[line {}] in ", loc.line);
